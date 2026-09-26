@@ -414,7 +414,6 @@ fn collect_rust_paths(
                 continue;
             }
         }
-        paths.push(path.to_path_buf());
     }
 
     Ok((paths, files_skipped))
@@ -751,6 +750,95 @@ mod tests {
         let (_, files_scanned, files_skipped, _) = scan_directory(&root, &[], &[]).unwrap();
 
         assert_eq!(files_scanned, 0);
+        assert_eq!(files_skipped, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // #576 regression guard: `collect_rust_paths` had an unconditional
+    // `paths.push(...)` after the verdict `match`, so every `Scan` file was
+    // pushed twice, every `Reject` file (an exclude/include mismatch) was
+    // pushed anyway, and every `GeneratedSkip` file was pushed anyway too.
+    // The four tests below call `collect_rust_paths` directly so a
+    // regression shows up on the raw path list, not just on aggregate
+    // counts that could look right by coincidence.
+
+    #[test]
+    fn collect_rust_paths_has_no_duplicates() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-collect-nodup-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn f() {}").unwrap();
+
+        let (paths, files_skipped) = collect_rust_paths(&root, &[], &[]).unwrap();
+
+        assert_eq!(
+            paths.len(),
+            1,
+            "a Scan-verdict file must appear exactly once, not once per push site"
+        );
+        assert_eq!(files_skipped, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn collect_rust_paths_exclude_glob_removes_the_matching_file() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-collect-exclude-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/keep.rs"), "pub fn keep() {}").unwrap();
+        fs::write(root.join("src/drop.rs"), "pub fn drop_me() {}").unwrap();
+
+        let (paths, _) =
+            collect_rust_paths(&root, &["src/drop.rs".to_string()], &[]).unwrap();
+
+        assert_eq!(paths, vec![root.join("src/keep.rs")]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn collect_rust_paths_include_glob_restricts_to_the_matching_file() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-collect-include-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/a.rs"), "pub fn a() {}").unwrap();
+        fs::write(root.join("src/b.rs"), "pub fn b() {}").unwrap();
+
+        let (paths, _) =
+            collect_rust_paths(&root, &[], &["src/a.rs".to_string()]).unwrap();
+
+        assert_eq!(paths, vec![root.join("src/a.rs")]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn collect_rust_paths_skips_a_generated_file_and_does_not_return_it() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-collect-generated-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "// @generated\npub fn generated() {}\n",
+        )
+        .unwrap();
+
+        let (paths, files_skipped) = collect_rust_paths(&root, &[], &[]).unwrap();
+
+        assert!(
+            paths.is_empty(),
+            "a GeneratedSkip file must not appear in the returned path list"
+        );
         assert_eq!(files_skipped, 1);
         fs::remove_dir_all(root).unwrap();
     }
@@ -1269,7 +1357,7 @@ impl C {
 
         let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> =
             vec![Box::new(soroban_guard_checks::UncheckedDivisorCheck)];
-        let (results, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+        let (results, _, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
 
         let divisor_findings: usize = results
             .iter()
@@ -1483,7 +1571,7 @@ mod dedup_tests {
         .unwrap();
 
         let checks = soroban_guard_checks::default_checks_with_config(&[], &[]);
-        let (results, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+        let (results, _, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
 
         let auth_after_write_count: usize = results
             .iter()

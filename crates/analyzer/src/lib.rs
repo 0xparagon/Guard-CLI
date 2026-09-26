@@ -1269,7 +1269,7 @@ impl C {
 
         let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> =
             vec![Box::new(soroban_guard_checks::UncheckedDivisorCheck)];
-        let (results, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+        let (results, _, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
 
         let divisor_findings: usize = results
             .iter()
@@ -1483,7 +1483,7 @@ mod dedup_tests {
         .unwrap();
 
         let checks = soroban_guard_checks::default_checks_with_config(&[], &[]);
-        let (results, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+        let (results, _, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
 
         let auth_after_write_count: usize = results
             .iter()

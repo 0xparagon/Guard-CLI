@@ -132,6 +132,13 @@ cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --max-findings 5
 
 `--max-findings` caps how many findings the pretty formatter prints (the trailing summary still counts the full result set). Use `--max-findings 0` to show all findings — the default.
 
+Re-run the scan whenever a `.rs` file changes. The terminal is cleared between runs when output goes to a TTY; pass `--no-clear` to keep previous results on screen:
+
+```bash
+cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --watch
+cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --watch --no-clear
+```
+
 Print full documentation for a single check:
 
 ```bash

@@ -156,18 +156,27 @@ fn collect_token_client_aliases(file: &File) -> HashSet<String> {
     aliases
 }
 
+/// `syn::UseTree` is an enum (`Path`/`Name`/`Rename`/`Glob`/`Group`), not a
+/// struct with `rename`/`prefix`/`group` fields — those don't exist. A
+/// renamed import (`use a::b::TokenClient as Tc;`) parses as nested `Path`
+/// nodes (`a`, then `b`) wrapping a terminal `Rename` node holding the
+/// original name (`ident`, here `TokenClient`) and the new one (`rename`,
+/// `Tc`); a group (`use a::{X, Y as Z};`) parses as a `Group` of `UseTree`s,
+/// each needing the same walk.
 fn collect_aliases_from_use_tree(tree: &syn::UseTree, out: &mut HashSet<String>) {
-    if let Some(rename) = &tree.rename {
-        if let Some(last) = tree.prefix.segments.last() {
-            if last.ident == "Client" || last.ident == "TokenClient" {
-                out.insert(rename.ident.to_string());
+    match tree {
+        syn::UseTree::Rename(rename) => {
+            if rename.ident == "Client" || rename.ident == "TokenClient" {
+                out.insert(rename.rename.to_string());
             }
         }
-    }
-    if let Some(group) = &tree.group {
-        for nested in group {
-            collect_aliases_from_use_tree(nested, out);
+        syn::UseTree::Path(path) => collect_aliases_from_use_tree(&path.tree, out),
+        syn::UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_aliases_from_use_tree(nested, out);
+            }
         }
+        syn::UseTree::Name(_) | syn::UseTree::Glob(_) => {}
     }
 }
 
@@ -336,5 +345,33 @@ impl C {
 }
 "#;
         assert_eq!(finding_lines(src).len(), 1);
+    }
+
+    #[test]
+    fn collects_a_direct_alias() -> Result<(), syn::Error> {
+        let file = syn::parse_file("use soroban_sdk::token::TokenClient as Tc;")?;
+        let aliases = collect_token_client_aliases(&file);
+        assert_eq!(aliases, HashSet::from(["Tc".to_string()]));
+        Ok(())
+    }
+
+    #[test]
+    fn collects_a_grouped_alias() -> Result<(), syn::Error> {
+        let file = syn::parse_file(
+            "use soroban_sdk::token::{Client as C, StellarAssetClient};",
+        )?;
+        let aliases = collect_token_client_aliases(&file);
+        // `Client as C` is aliased and collected; `StellarAssetClient` has no
+        // rename at all, so it contributes nothing (it's a `Name`, not a
+        // `Rename`) — the group must not be mistaken for one big rename.
+        assert_eq!(aliases, HashSet::from(["C".to_string()]));
+        Ok(())
+    }
+
+    #[test]
+    fn a_non_client_rename_is_not_collected() -> Result<(), syn::Error> {
+        let file = syn::parse_file("use soroban_sdk::Address as Addr;")?;
+        assert!(collect_token_client_aliases(&file).is_empty());
+        Ok(())
     }
 }

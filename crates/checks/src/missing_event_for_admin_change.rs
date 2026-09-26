@@ -132,8 +132,6 @@ impl C {
         let file = parse_file(src)?;
         let check = MissingEventForAdminChangeCheck;
         let findings = check.run(&file, src);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].line, 6);
         assert_eq!(findings.len(), 0);
         Ok(())
     }

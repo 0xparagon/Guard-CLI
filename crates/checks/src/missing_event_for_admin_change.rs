@@ -115,6 +115,8 @@ impl C {
         let check = MissingEventForAdminChangeCheck;
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].function_name, "set_owner");
+        assert_eq!(findings[0].line, 4);
         Ok(())
     }
 
@@ -132,8 +134,12 @@ impl C {
         let file = parse_file(src)?;
         let check = MissingEventForAdminChangeCheck;
         let findings = check.run(&file, src);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].line, 6);
+        // `log.set(...)` writes a local `Map`, never touching `env.storage()`
+        // — `StorageWriteVisitor` only counts a write whose receiver chain
+        // contains `.storage()`, so this must not be flagged. (Two earlier,
+        // directly contradictory assertions here — `findings.len() == 1`
+        // then `findings.len() == 0` — looked like leftovers from a bad
+        // merge; removed rather than left in as always-failing.)
         assert_eq!(findings.len(), 0);
         Ok(())
     }

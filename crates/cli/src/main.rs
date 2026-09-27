@@ -4,7 +4,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::Colorize;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
-use soroban_guard_analyzer::scan_directory_with_checks;
+use soroban_guard_analyzer::{scan_directory_with_checks, ScanError};
 use soroban_guard_checks::{default_checks, default_checks_with_config, Finding, Severity};
 use std::collections::HashSet;
 use std::fs;
@@ -184,14 +184,23 @@ fn run_scan(
             if should_fail { 1 } else { 0 }
         }
         Err(e) => {
+            // A directory with several unparseable/unreadable files surfaces every
+            // one of them (issue #629) instead of just the first one rayon happened
+            // to observe; every other error prints as the single message it is.
+            let messages: Vec<String> = match &e {
+                ScanError::Multiple(errs) => errs.iter().map(ToString::to_string).collect(),
+                other => vec![other.to_string()],
+            };
             if opts.json {
-                let envelope = serde_json::json!({ "error": e.to_string() });
+                let envelope = serde_json::json!({ "error": e.to_string(), "errors": messages });
                 match serde_json::to_string_pretty(&envelope) {
                     Ok(payload) => println!("{}", payload),
                     Err(json_err) => eprintln!("{} {}", "error:".red().bold(), json_err),
                 }
             } else {
-                eprintln!("{} {}", "error:".red().bold(), e);
+                for message in &messages {
+                    eprintln!("{} {}", "error:".red().bold(), message);
+                }
             }
             2
         }

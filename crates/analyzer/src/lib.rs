@@ -69,6 +69,11 @@ pub enum ScanError {
     /// The scan is incomplete and must not be treated as clean.
     #[error("Directory traversal error at {path}: {reason}")]
     Traversal { path: PathBuf, reason: String },
+    /// Every per-file error collected from a scan (in path order) instead of aborting
+    /// on the first one, so a crate with several broken files gets one fix-and-rerun
+    /// cycle instead of one per file.
+    #[error("{} files failed to scan", .0.len())]
+    Multiple(Vec<ScanError>),
 }
 
 /// The panic payload recovered from a [`Check`] that aborted mid-scan, in
@@ -297,6 +302,44 @@ fn canonicalize_root(root: &Path) -> Result<PathBuf, ScanError> {
         path: root.to_path_buf(),
         source,
     })
+}
+
+/// Path used to sort a [`ScanError`] for deterministic multi-error reporting (#629).
+fn scan_error_path(err: &ScanError) -> PathBuf {
+    match err {
+        ScanError::ScanRoot { path, .. }
+        | ScanError::PermissionDenied { path }
+        | ScanError::IoRead { path, .. }
+        | ScanError::Parse { path, .. }
+        | ScanError::CheckPanic { path, .. }
+        | ScanError::Traversal { path, .. } => path.clone(),
+        ScanError::Io(_) | ScanError::InvalidGlobPattern { .. } | ScanError::Multiple(_) => {
+            PathBuf::new()
+        }
+    }
+}
+
+/// Collect the per-file results of a parallel scan. When every file succeeded,
+/// returns the values in whatever order rayon produced them (callers sort as
+/// needed). When one or more files failed, every error is collected — not just
+/// the first one rayon happened to observe — sorted by path so the report is
+/// deterministic across runs, and returned together as `ScanError::Multiple`
+/// (issue #629).
+fn collect_scan_results<T>(results: Vec<Result<T, ScanError>>) -> Result<Vec<T>, ScanError> {
+    let mut oks = Vec::with_capacity(results.len());
+    let mut errs = Vec::new();
+    for result in results {
+        match result {
+            Ok(value) => oks.push(value),
+            Err(err) => errs.push(err),
+        }
+    }
+    if errs.is_empty() {
+        Ok(oks)
+    } else {
+        errs.sort_by(|a, b| scan_error_path(a).cmp(&scan_error_path(b)));
+        Err(ScanError::Multiple(errs))
+    }
 }
 
 /// Compile a list of glob source strings into `glob::Pattern`s, surfacing the first
@@ -530,12 +573,14 @@ pub fn scan_directory(
     let (paths, files_skipped) = collect_rust_paths(&root, excludes, includes)?;
     let files_scanned = paths.len();
 
-    let (collected, panics): (Vec<Vec<Finding>>, Vec<Vec<ScanError>>) = paths
-        .par_iter()
-        .map(|path| run_checks_for_file(path, &root, &checks))
-        .collect::<Result<Vec<_>, ScanError>>()?
-        .into_iter()
-        .unzip();
+    let (collected, panics): (Vec<Vec<Finding>>, Vec<Vec<ScanError>>) = collect_scan_results(
+        paths
+            .par_iter()
+            .map(|path| run_checks_for_file(path, &root, &checks))
+            .collect(),
+    )?
+    .into_iter()
+    .unzip();
 
     let mut findings: Vec<Finding> = collected.into_iter().flatten().collect();
     let check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
@@ -565,24 +610,26 @@ pub fn scan_directory_with_checks(
     let (paths, files_skipped) = collect_rust_paths(&root, excludes, includes)?;
     let files_scanned = paths.len();
 
-    let per_file = paths
-        .par_iter()
-        .map(|path| {
-            let (findings, check_panics) = run_checks_for_file(path, &root, checks)?;
-            let file_label = if root.is_file() {
-                path.file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string()
-            } else {
-                path.strip_prefix(&root)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .to_string()
-            };
-            Ok((FileScanResult { file_path: file_label, findings }, check_panics))
-        })
-        .collect::<Result<Vec<_>, ScanError>>()?;
+    let per_file = collect_scan_results(
+        paths
+            .par_iter()
+            .map(|path| {
+                let (findings, check_panics) = run_checks_for_file(path, &root, checks)?;
+                let file_label = if root.is_file() {
+                    path.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                } else {
+                    path.strip_prefix(&root)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .to_string()
+                };
+                Ok((FileScanResult { file_path: file_label, findings }, check_panics))
+            })
+            .collect(),
+    )?;
 
     let mut results: Vec<FileScanResult> =
         per_file.iter().map(|(r, _)| r.clone()).collect();
@@ -634,12 +681,14 @@ pub fn scan_files(
     let files_scanned = selected.len();
     let checks = default_checks();
 
-    let (collected, panics): (Vec<Vec<Finding>>, Vec<Vec<ScanError>>) = selected
-        .par_iter()
-        .map(|path| run_checks_for_file(path, &root, &checks))
-        .collect::<Result<Vec<_>, ScanError>>()?
-        .into_iter()
-        .unzip();
+    let (collected, panics): (Vec<Vec<Finding>>, Vec<Vec<ScanError>>) = collect_scan_results(
+        selected
+            .par_iter()
+            .map(|path| run_checks_for_file(path, &root, &checks))
+            .collect(),
+    )?
+    .into_iter()
+    .unzip();
 
     let mut findings: Vec<Finding> = collected.into_iter().flatten().collect();
     let check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
@@ -987,6 +1036,42 @@ mod tests {
             err.to_string().contains("traversal") || err.to_string().contains("private"),
             "error message should mention the path or 'traversal', got: {err}"
         );
+    }
+
+    /// A directory with two unparseable files must report both `ScanError::Parse`
+    /// errors, in path order, on every run (issue #629) instead of just whichever
+    /// one rayon happened to surface first.
+    #[test]
+    fn reports_every_unparseable_file_in_path_order() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-multi-parse-error-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/a_broken.rs"), "pub fn a( {{{").unwrap();
+        fs::write(root.join("src/b_broken.rs"), "pub fn b( }}}").unwrap();
+        fs::write(root.join("src/ok.rs"), "pub fn f() {}").unwrap();
+
+        for _ in 0..3 {
+            let err = scan_directory(&root, &[], &[]).unwrap_err();
+            match err {
+                ScanError::Multiple(errs) => {
+                    assert_eq!(errs.len(), 2, "expected both broken files reported");
+                    let paths: Vec<PathBuf> = errs.iter().map(scan_error_path).collect();
+                    assert!(paths.windows(2).all(|w| w[0] <= w[1]), "not sorted: {paths:?}");
+                    assert!(paths
+                        .iter()
+                        .any(|p| p.to_string_lossy().ends_with("a_broken.rs")));
+                    assert!(paths
+                        .iter()
+                        .any(|p| p.to_string_lossy().ends_with("b_broken.rs")));
+                }
+                other => panic!("expected ScanError::Multiple, got {other:?}"),
+            }
+        }
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

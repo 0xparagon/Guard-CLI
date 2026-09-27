@@ -293,8 +293,14 @@ Integer division truncates the fractional part, which can lead to precision loss
 
 - Syntactic only — any non-literal divisor triggers the finding regardless of actual values.
 - Does not detect `checked_div` misuse or rounding strategies.
+- **Overlap with `unchecked-divisor`:** when a division's divisor is both non-literal
+  and unvalidated, `unchecked-divisor` (High) also fires on the same file/line/function.
+  The analyzer's `suppress_redundant_division_finding` drops the `integer-division-truncation`
+  finding in that case, since the High finding already covers the same expression.
+  Validating the divisor first (so `unchecked-divisor` does not fire) lets
+  `integer-division-truncation` surface on its own.
 
-**Fixture:** tests in `crates/checks/src/division.rs`
+**Fixture:** `test-contracts/division-vulnerable/`, `test-contracts/division-safe/`; tests in `crates/checks/src/division.rs`
 
 ---
 

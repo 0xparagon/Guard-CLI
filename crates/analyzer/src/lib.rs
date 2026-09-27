@@ -1497,4 +1497,55 @@ mod dedup_tests {
 
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// Regression test for #620: when the divisor is validated to be non-zero before
+    /// the division, `unchecked-divisor` should not fire, and
+    /// `suppress_redundant_division_finding` must not suppress the unrelated
+    /// `integer-division-truncation` finding on that same division.
+    #[test]
+    fn validated_divisor_still_reports_truncation() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-division-validated-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+            #![no_std]
+            use soroban_sdk::{contract, contractimpl, Env};
+
+            #[contract]
+            pub struct C;
+
+            #[contractimpl]
+            impl C {
+                pub fn share(_env: Env, total: i128, parts: i128) -> i128 {
+                    if parts == 0 {
+                        panic!("parts must not be zero");
+                    }
+                    total / parts
+                }
+            }
+            "#,
+        )
+        .unwrap();
+
+        let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> = vec![
+            Box::new(soroban_guard_checks::UncheckedDivisorCheck),
+            Box::new(soroban_guard_checks::IntegerDivisionTruncationCheck),
+        ];
+        let (results, _, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+        let findings: Vec<_> = results.iter().flat_map(|r| r.findings.iter()).collect();
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check_name == "integer-division-truncation"),
+            "expected integer-division-truncation on a validated-but-truncating division; findings: {findings:#?}"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -1008,16 +1008,11 @@ fn hyperlink(url: &str, text: &str) -> String {
 }
 
 fn style_check_name(check_name: &str, severity: Severity) -> String {
-    if std::env::var_os("NO_COLOR").is_some() {
-        return check_name.to_string();
+    match severity {
+        Severity::High => check_name.red().bold().to_string(),
+        Severity::Medium => check_name.magenta().to_string(),
+        Severity::Low => check_name.dimmed().to_string(),
     }
-
-    let prefix = match severity {
-        Severity::High => "\u{1b}[31m\u{1b}[1m",
-        Severity::Medium => "\u{1b}[35m",
-        Severity::Low => "\u{1b}[2m",
-    };
-    format!("{prefix}{check_name}\u{1b}[0m")
 }
 
 fn print_pretty(
@@ -1422,7 +1417,21 @@ mod tests {
         let low = style_check_name("low-check", Severity::Low);
 
         assert!(high.contains("\u{1b}[1;31m"), "high check name should be bold red");
-        assert!(low.contains("\u{1b}[2;37m"), "low check name should be dimmed white");
+        assert!(low.contains("\u{1b}[2m"), "low check name should be dimmed");
+    }
+
+    #[test]
+    fn check_name_styling_is_plain_when_color_disabled() {
+        control::set_override(false);
+        let high = style_check_name("high-check", Severity::High);
+        let medium = style_check_name("medium-check", Severity::Medium);
+        let low = style_check_name("low-check", Severity::Low);
+
+        assert_eq!(high, "high-check");
+        assert_eq!(medium, "medium-check");
+        assert_eq!(low, "low-check");
+
+        control::set_override(true);
     }
 
     #[test]

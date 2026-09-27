@@ -65,6 +65,9 @@ enum Commands {
         /// Watch for .rs file changes and re-run the scan automatically
         #[arg(long, short = 'w')]
         watch: bool,
+        /// Do not clear the terminal between watch re-scans (always implied by --json, --sarif, and --output)
+        #[arg(long)]
+        no_clear: bool,
         /// Cap the number of findings printed to stdout (0 = unlimited, default: 0)
         #[arg(long, value_name = "N", default_value_t = 0)]
         max_findings: usize,
@@ -115,7 +118,7 @@ fn run_scan(
     active_checks: &[Box<dyn soroban_guard_checks::Check + Send + Sync>],
 ) -> i32 {
     match scan_directory_with_checks(&opts.path, &opts.exclude, &opts.includes, active_checks) {
-        Ok((results, files_scanned, files_skipped)) => {
+        Ok((results, files_scanned, files_skipped, _)) => {
             let findings: Vec<Finding> =
                 results.into_iter().flat_map(|r| r.findings).collect();
             let should_fail = findings
@@ -279,6 +282,7 @@ fn main() {
             fail_on,
             disable_check,
             watch,
+            no_clear,
             max_findings,
         } => {
             if no_color || std::env::var_os("NO_COLOR").is_some() {
@@ -296,7 +300,7 @@ fn main() {
 
             // Try to load soroban-guard.toml from current directory to get default path.
             let config_for_default = match config::load(&PathBuf::from(".")) {
-                Ok(c) => c.unwrap_or_default(),
+                Ok((c, _)) => c.unwrap_or_default(),
                 Err(e) => {
                     eprintln!("{} {}", "error:".red().bold(), e);
                     std::process::exit(2);
@@ -316,9 +320,17 @@ fn main() {
                 std::process::exit(2);
             };
 
-            // Load soroban-guard.toml from the scan root (if present).
+            // Load soroban-guard.toml, searching upward from the scan path.
             let cfg = match config::load(&scan_path) {
-                Ok(c) => c.unwrap_or_default(),
+                Ok((c, config_path)) => {
+                    if verbose {
+                        match &config_path {
+                            Some(p) => eprintln!("Using config file {}", p.display()),
+                            None => eprintln!("No soroban-guard.toml found"),
+                        }
+                    }
+                    c.unwrap_or_default()
+                }
                 Err(e) => {
                     eprintln!("{} {}", "error:".red().bold(), e);
                     std::process::exit(2);

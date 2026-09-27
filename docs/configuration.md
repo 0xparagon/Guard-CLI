@@ -1,13 +1,18 @@
 # Configuration file
 
-`soroban-guard` reads an optional `soroban-guard.toml` from the scan root (the
-directory you pass to `scan`). It lets you pin project-wide defaults so
-contributors and CI don't have to repeat CLI flags.
+`soroban-guard` reads an optional `soroban-guard.toml`. It lets you pin
+project-wide defaults so contributors and CI don't have to repeat CLI flags.
 
-- If the file is absent, defaults are unchanged (no min severity override, no
-  disabled checks, no extra sensitive names).
-- If the file exists but fails to parse, the scan exits with code `2` and an
-  error message pointing at the file.
+- The search starts at the scan path (its parent directory, when the scan
+  path is a single file) and climbs through parent directories looking for
+  `soroban-guard.toml`, using the nearest one found. The search stops at the
+  filesystem root or at the first directory that itself contains `.git` — a
+  config file above your project's repository root is never picked up.
+  Pass `--verbose` to see which config file was used, or that none was found.
+- If no config file is found anywhere in that search, defaults are unchanged
+  (no min severity override, no disabled checks, no extra sensitive names).
+- If a config file is found but fails to parse, the scan exits with code `2`
+  and an error message pointing at the file.
 - CLI flags always take precedence over the config file. `--fail-on` overrides
   `[scan] min_severity`; `--disable-check` is merged with `[checks] disabled`.
 

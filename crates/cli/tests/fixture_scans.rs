@@ -283,7 +283,7 @@ path = "src"
 
     // Scan using the path from config (via current directory config)
     let config_root = match config::load(&root) {
-        Ok(Some(cfg)) => {
+        Ok((Some(cfg), _)) => {
             if let Some(path_str) = cfg.scan.path {
                 root.join(&path_str)
             } else {

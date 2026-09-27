@@ -43,6 +43,11 @@ fn build_fn_spans(file: &syn::File) -> Vec<FnSpan> {
 pub enum ScanError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("cannot read scan path {path}: {source}")]
+    ScanRoot {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("Permission denied reading {path}")]
     PermissionDenied { path: PathBuf },
     #[error("IO error reading {path}: {source}")]
@@ -285,6 +290,15 @@ fn suppress_redundant_division_finding(findings: &mut Vec<Finding>) {
     });
 }
 
+/// Canonicalize a scan root, naming the path in the error instead of the bare
+/// `io::Error` that `Path::canonicalize` alone would surface (issue #628).
+fn canonicalize_root(root: &Path) -> Result<PathBuf, ScanError> {
+    root.canonicalize().map_err(|source| ScanError::ScanRoot {
+        path: root.to_path_buf(),
+        source,
+    })
+}
+
 /// Compile a list of glob source strings into `glob::Pattern`s, surfacing the first
 /// invalid pattern as `ScanError::InvalidGlobPattern`. Shared by the exclude and
 /// include filters so `--include`/`--exclude` stay behaviourally identical.
@@ -511,7 +525,7 @@ pub fn scan_directory(
     excludes: &[String],
     includes: &[String],
 ) -> Result<(Vec<Finding>, usize, usize, Vec<ScanError>), ScanError> {
-    let root = root.canonicalize()?;
+    let root = canonicalize_root(root)?;
     let checks = default_checks();
     let (paths, files_skipped) = collect_rust_paths(&root, excludes, includes)?;
     let files_scanned = paths.len();
@@ -547,7 +561,7 @@ pub fn scan_directory_with_checks(
     includes: &[String],
     checks: &[Box<dyn Check + Send + Sync>],
 ) -> Result<(Vec<FileScanResult>, usize, usize, Vec<ScanError>), ScanError> {
-    let root = root.canonicalize()?;
+    let root = canonicalize_root(root)?;
     let (paths, files_skipped) = collect_rust_paths(&root, excludes, includes)?;
     let files_scanned = paths.len();
 
@@ -601,7 +615,7 @@ pub fn scan_files(
     excludes: &[String],
     includes: &[String],
 ) -> Result<(Vec<Finding>, usize, usize, Vec<ScanError>), ScanError> {
-    let root = root.canonicalize()?;
+    let root = canonicalize_root(root)?;
     let exclude_patterns = compile_globs(excludes)?;
     let include_patterns = compile_globs(includes)?;
 
@@ -664,6 +678,21 @@ mod tests {
         assert_eq!(files_skipped, 0);
         assert!(check_panics.is_empty());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn scan_directory_names_the_path_on_a_missing_root() {
+        let missing = std::env::temp_dir().join(format!(
+            "soroban-guard-missing-root-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let err = scan_directory(&missing, &[], &[]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&missing.display().to_string()),
+            "expected the scan path in the error, got: {msg}"
+        );
     }
 
     #[test]

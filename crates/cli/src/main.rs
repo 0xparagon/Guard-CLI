@@ -296,26 +296,31 @@ fn main() {
                 std::process::exit(2);
             }
 
-            // Try to load soroban-guard.toml from current directory to get default path.
-            let config_for_default = match config::load(&PathBuf::from(".")) {
-                Ok(c) => c.unwrap_or_default(),
-                Err(e) => {
-                    eprintln!("{} {}", "error:".red().bold(), e);
-                    std::process::exit(2);
-                }
-            };
-
             // Resolve scan path: CLI argument takes precedence, then config, then error.
+            // The current-directory config is only needed as a fallback for the scan
+            // path itself, so it's only loaded when no path argument was given -
+            // otherwise a malformed `./soroban-guard.toml` would abort scans of an
+            // unrelated, explicitly-provided path (Issue #626).
             let scan_path = if let Some(p) = path {
                 p
-            } else if let Some(config_path) = &config_for_default.scan.path {
-                PathBuf::from(config_path)
             } else {
-                eprintln!(
-                    "{} no scan path provided and none found in soroban-guard.toml",
-                    "error:".red().bold()
-                );
-                std::process::exit(2);
+                // Try to load soroban-guard.toml from current directory to get default path.
+                let config_for_default = match config::load(&PathBuf::from(".")) {
+                    Ok(c) => c.unwrap_or_default(),
+                    Err(e) => {
+                        eprintln!("{} {}", "error:".red().bold(), e);
+                        std::process::exit(2);
+                    }
+                };
+                if let Some(config_path) = &config_for_default.scan.path {
+                    PathBuf::from(config_path)
+                } else {
+                    eprintln!(
+                        "{} no scan path provided and none found in soroban-guard.toml",
+                        "error:".red().bold()
+                    );
+                    std::process::exit(2);
+                }
             };
 
             // Load soroban-guard.toml from the scan root (if present).

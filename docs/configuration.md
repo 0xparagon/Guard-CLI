@@ -11,12 +11,18 @@ project-wide defaults so contributors and CI don't have to repeat CLI flags.
   Pass `--verbose` to see which config file was used, or that none was found.
 - If no config file is found anywhere in that search, defaults are unchanged
   (no min severity override, no disabled checks, no extra sensitive names).
-- If a config file is found but fails to parse, the scan exits with code `2`
-  and an error message pointing at the file.
+- If a config file is found but fails to parse — including an unknown key
+  anywhere in the file, see below — the scan exits with code `2` and an error
+  message pointing at the file and the offending key.
 - CLI flags always take precedence over the config file. `--fail-on` overrides
   `[scan] min_severity`; `--disable-check` is merged with `[checks] disabled`.
 
 ## Schema
+
+Every table below rejects unknown keys: a typo (`disable` instead of
+`disabled`) or a misplaced section (`[check]` instead of `[checks]`) is
+treated as a malformed config — the scan exits `2` naming the offending key,
+rather than silently ignoring it.
 
 ```toml
 [scan]

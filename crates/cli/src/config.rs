@@ -4,15 +4,19 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 /// Top-level config file structure.
+///
+/// `deny_unknown_fields` turns a typo'd or misplaced key (e.g. `[check]`
+/// instead of `[checks]`) into the same malformed-config error as invalid
+/// TOML, instead of silently parsing and doing nothing.
 #[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct GuardConfig {
     pub scan: ScanConfig,
     pub checks: ChecksConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ScanConfig {
     /// Default scan path (overridden by the CLI positional argument).
     pub path: Option<String>,
@@ -25,7 +29,7 @@ pub struct ScanConfig {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ChecksConfig {
     /// Check names to skip.
     pub disabled: Vec<String>,
@@ -33,7 +37,7 @@ pub struct ChecksConfig {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SensitiveNamesConfig {
     /// Extra function names added to the built-in `SENSITIVE_NAMES` list.
     pub extra: Vec<String>,
@@ -212,6 +216,47 @@ mod tests {
 
         let err = load(&root).unwrap_err();
         assert!(err.contains("soroban-guard.toml"), "{err}");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unknown_top_level_table_is_rejected() {
+        let root = temp_root("unknown-top-level");
+        fs::write(root.join("soroban-guard.toml"), "[check]\ndisabled = []\n").unwrap();
+
+        let err = load(&root).unwrap_err();
+        assert!(err.contains("check"), "{err}");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unknown_key_under_scan_is_rejected() {
+        let root = temp_root("unknown-scan-key");
+        fs::write(
+            root.join("soroban-guard.toml"),
+            "[scan]\nmin_severity_level = \"high\"\n",
+        )
+        .unwrap();
+
+        let err = load(&root).unwrap_err();
+        assert!(err.contains("min_severity_level"), "{err}");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unknown_key_under_checks_sensitive_names_is_rejected() {
+        let root = temp_root("unknown-sensitive-names-key");
+        fs::write(
+            root.join("soroban-guard.toml"),
+            "[checks.sensitive_names]\nextras = [\"drain\"]\n",
+        )
+        .unwrap();
+
+        let err = load(&root).unwrap_err();
+        assert!(err.contains("extras"), "{err}");
 
         fs::remove_dir_all(root).unwrap();
     }

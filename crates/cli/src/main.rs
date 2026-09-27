@@ -4,7 +4,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::Colorize;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
-use soroban_guard_analyzer::{scan_directory_with_checks, ScanError};
+use soroban_guard_analyzer::{is_ignored_path, scan_directory_with_checks, ScanError};
 use soroban_guard_checks::{default_checks, default_checks_with_config, Finding, Severity};
 use std::collections::HashSet;
 use std::fs;
@@ -444,12 +444,17 @@ fn main() {
                 while let Ok(res) = rx.recv() {
                     match res {
                         Ok(event) => {
-                            // React to create/modify/remove events on .rs files.
+                            // React to create/modify/remove events on .rs files, skipping
+                            // paths the scanner itself would skip (target/, .git/) so a
+                            // `cargo build` running elsewhere doesn't trigger a re-scan
+                            // (issue #627). --exclude/--include globs are not applied to
+                            // watch events; only this ignore-list is.
                             let is_relevant = matches!(
                                 event.kind,
                                 EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
                             ) && event.paths.iter().any(|p| {
                                 p.extension().map(|e| e == "rs").unwrap_or(false)
+                                    && !is_ignored_path(p)
                             });
 
                             if !is_relevant {
@@ -467,6 +472,7 @@ fn main() {
                                             EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
                                         ) && e.paths.iter().any(|p| {
                                             p.extension().map(|x| x == "rs").unwrap_or(false)
+                                                && !is_ignored_path(p)
                                         });
                                         if !relevant {
                                             continue;

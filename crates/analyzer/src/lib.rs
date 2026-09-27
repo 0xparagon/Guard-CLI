@@ -304,6 +304,16 @@ fn canonicalize_root(root: &Path) -> Result<PathBuf, ScanError> {
     })
 }
 
+/// Whether `path` should be skipped by the scanner (and, via this same helper, by the
+/// CLI's watch-mode event filter): any component named `target` or `.git`.
+///
+/// Shared so the watcher can't drift from the scanner's own skip-list and re-trigger
+/// on build artifacts under `target/` (issue #627).
+pub fn is_ignored_path(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c.as_os_str().to_str(), Some("target" | ".git")))
+}
+
 /// The path relative to `root` shown in findings: the bare file name when `root`
 /// itself is a single file, otherwise the path stripped of the `root` prefix.
 /// Shared by [`run_checks_for_file`] and [`scan_directory_with_checks`] so the two
@@ -460,10 +470,7 @@ fn collect_rust_paths(
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        if path
-            .components()
-            .any(|c| matches!(c.as_os_str().to_str(), Some("target" | ".git")))
-        {
+        if is_ignored_path(path) {
             continue;
         }
         let label = path.strip_prefix(root).unwrap_or(path);
@@ -725,6 +732,13 @@ mod tests {
         assert_eq!(files_skipped, 0);
         assert!(check_panics.is_empty());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn is_ignored_path_skips_target_and_git_components() {
+        assert!(is_ignored_path(Path::new("crate/target/debug/build.rs")));
+        assert!(is_ignored_path(Path::new(".git/hooks/pre-commit.rs")));
+        assert!(!is_ignored_path(Path::new("crate/src/lib.rs")));
     }
 
     #[test]

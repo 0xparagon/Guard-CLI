@@ -198,8 +198,7 @@ fn run_scan(
     }
 }
 
-/// Returns a UTC timestamp string like "2026-07-28 23:09:36" without any
-/// external date crate.
+/// Returns a UTC time string like "23:09:36 UTC" without any external date crate.
 fn chrono_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
@@ -209,43 +208,7 @@ fn chrono_timestamp() -> String {
     let s = secs % 60;
     let m = (secs / 60) % 60;
     let h = (secs / 3600) % 24;
-    let days = secs / 86400;
-    let (year, month, day) = days_to_ymd(days);
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        year, month, day, h, m, s
-    )
-}
-
-/// Convert days since Unix epoch (1970-01-01) to (year, month, day).
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    let mut year = 1970u64;
-    loop {
-        let days_in_year = if is_leap(year) { 366 } else { 365 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-    let months: [u64; 12] = [
-        31,
-        if is_leap(year) { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
-    ];
-    let mut month = 1u64;
-    for &dim in &months {
-        if days < dim {
-            break;
-        }
-        days -= dim;
-        month += 1;
-    }
-    (year, month, days + 1)
-}
-
-fn is_leap(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    format!("{:02}:{:02}:{:02} UTC", h, m, s)
 }
 
 /// Parse a `--fail-on` / `min_severity` string into a `Severity`.

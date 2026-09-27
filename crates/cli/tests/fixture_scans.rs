@@ -125,6 +125,18 @@ fn storage_fixtures() {
 }
 
 #[test]
+fn admin_event_safe_produces_no_findings() {
+    let (findings, _, _) = scan_directory(&fixture_path("admin-event-safe"), &[], &[])
+        .unwrap_or_else(|error| panic!("failed to scan admin-event-safe: {error}"));
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.check_name != "missing-event-for-admin-change"),
+        "admin-event-safe unexpectedly produced missing-event-for-admin-change; findings: {findings:#?}"
+    );
+}
+
+#[test]
 fn zero_address_fixtures() {
     assert_fixture_pair("zero-address", "missing-zero-address-check");
 }

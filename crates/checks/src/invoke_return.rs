@@ -140,7 +140,7 @@ impl<'ast, 'a> Visit<'ast> for IdentUsageVisitor<'a> {
             for tt in tokens {
                 match tt {
                     proc_macro2::TokenTree::Ident(id) => {
-                        if id.to_string() == target {
+                        if id == target {
                             return true;
                         }
                     }

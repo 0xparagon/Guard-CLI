@@ -125,10 +125,10 @@ impl<'ast> Visit<'ast> for AuthScanner {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if self.first_valid_auth_line.is_none() {
-            if is_valid_auth_call(node, &self.env_name, &self.address_names, &self.admin_vars) {
-                self.first_valid_auth_line = Some(node.span().start().line);
-            }
+        if self.first_valid_auth_line.is_none()
+            && is_valid_auth_call(node, &self.env_name, &self.address_names, &self.admin_vars)
+        {
+            self.first_valid_auth_line = Some(node.span().start().line);
         }
         visit::visit_expr_method_call(self, node);
     }

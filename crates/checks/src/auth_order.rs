@@ -8,7 +8,7 @@ use crate::{Check, Finding, Severity};
 use std::collections::HashSet;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Block, Expr, ExprMethodCall, File, FnArg, Pat, Stmt, Type};
+use syn::{Block, ExprMethodCall, File, FnArg, Pat, Stmt, Type};
 
 const CHECK_NAME: &str = "auth-after-storage-write";
 

@@ -304,6 +304,24 @@ fn canonicalize_root(root: &Path) -> Result<PathBuf, ScanError> {
     })
 }
 
+/// The path relative to `root` shown in findings: the bare file name when `root`
+/// itself is a single file, otherwise the path stripped of the `root` prefix.
+/// Shared by [`run_checks_for_file`] and [`scan_directory_with_checks`] so the two
+/// copies of this logic can't drift (issue #630).
+fn file_label(path: &Path, root: &Path) -> String {
+    if root.is_file() {
+        path.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    } else {
+        path.strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string()
+    }
+}
+
 /// Path used to sort a [`ScanError`] for deterministic multi-error reporting (#629).
 fn scan_error_path(err: &ScanError) -> PathBuf {
     match err {
@@ -490,17 +508,7 @@ fn run_checks_for_file(
         path: path.to_path_buf(),
         message: e.to_string(),
     })?;
-    let file_label = if root.is_file() {
-        path.file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-    } else {
-        path.strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string()
-    };
+    let file_label = file_label(path, root);
     let fn_spans = build_fn_spans(&syn_file);
     let suppressions = parse_suppressions(&content, &fn_spans);
 
@@ -615,18 +623,8 @@ pub fn scan_directory_with_checks(
             .par_iter()
             .map(|path| {
                 let (findings, check_panics) = run_checks_for_file(path, &root, checks)?;
-                let file_label = if root.is_file() {
-                    path.file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string()
-                } else {
-                    path.strip_prefix(&root)
-                        .unwrap_or(path)
-                        .to_string_lossy()
-                        .to_string()
-                };
-                Ok((FileScanResult { file_path: file_label, findings }, check_panics))
+                let label = file_label(path, &root);
+                Ok((FileScanResult { file_path: label, findings }, check_panics))
             })
             .collect(),
     )?;

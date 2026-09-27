@@ -142,22 +142,24 @@ fn run_scan(
             };
 
             if let Some(result) = structured_payload {
-                if should_print_results(opts.quiet, should_fail) {
-                    match result {
-                        Ok(payload) => {
-                            if let Some(ref out_path) = opts.output {
-                                if let Err(e) = write_output(out_path, &payload) {
-                                    eprintln!("{} {}", "error:".red().bold(), e);
-                                    return 2;
-                                }
-                            } else {
-                                println!("{payload}");
+                match result {
+                    Ok(payload) => {
+                        // `--quiet` suppresses console text only; a requested `--output`
+                        // file is a build artifact and must always be written, whether
+                        // the scan passes or fails (Issue #625).
+                        if let Some(ref out_path) = opts.output {
+                            if let Err(e) = write_output(out_path, &payload) {
+                                eprintln!("{} {}", "error:".red().bold(), e);
+                                return 2;
                             }
                         }
-                        Err(e) => {
-                            eprintln!("{} {}", "error:".red().bold(), e);
-                            return 2;
+                        if opts.output.is_none() && should_print_results(opts.quiet, should_fail) {
+                            println!("{payload}");
                         }
+                    }
+                    Err(e) => {
+                        eprintln!("{} {}", "error:".red().bold(), e);
+                        return 2;
                     }
                 }
             } else if should_print_results(opts.quiet, should_fail) {
@@ -894,7 +896,9 @@ fn describe_check(name: &str) -> (&'static str, &'static str) {
 }
 
 fn write_output(path: &Path, payload: &str) -> Result<(), std::io::Error> {
-    fs::write(path, payload)
+    // Match the println! convention used for stdout: append a trailing newline
+    // so file contents are byte-for-byte identical to what would be printed.
+    fs::write(path, format!("{payload}\n"))
 }
 
 /// Count findings bucketed by severity, returned as `(high, medium, low)`.

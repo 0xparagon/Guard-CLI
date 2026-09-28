@@ -11,7 +11,11 @@ env:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -45,6 +49,7 @@ jobs:
       - name: Check test-contracts fixtures
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/fixture-contracts
+        shell: bash
         run: |
           set -e
           find test-contracts -mindepth 2 -maxdepth 2 -name Cargo.toml -print0 \

@@ -15,8 +15,6 @@ use syn::spanned::Spanned;
 use thiserror::Error;
 use walkdir::WalkDir;
 
-const SUPPRESSION_PREFIX: &str = "// soroban-guard: allow(";
-
 /// The source line range of one `#[contractimpl]` method, paired with its enclosing type's
 /// name — used to scope function-level suppressions to the specific `impl` block they were
 /// written above, instead of matching any same-named method anywhere in the file.
@@ -167,9 +165,14 @@ fn has_generated_file_header(path: &Path) -> Result<bool, std::io::Error> {
     Ok(false)
 }
 
+/// Parses `// soroban-guard: allow(a, b)`. Whitespace is optional after `//` and on
+/// either side of `:` (`//soroban-guard:allow(x)` and `//  soroban-guard : allow(x)` are
+/// accepted); `///` and `//!` doc comments are not suppressions.
 fn parse_allow_checks(line: &str) -> Option<Vec<String>> {
-    let trimmed = line.trim_start();
-    let rest = trimmed.strip_prefix(SUPPRESSION_PREFIX)?;
+    let rest = line.trim_start().strip_prefix("//")?.trim_start();
+    let rest = rest.strip_prefix("soroban-guard")?.trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix("allow(")?;
     let (inside, _) = rest.split_once(')')?;
     let checks: Vec<String> = inside
         .split(',')
@@ -1080,6 +1083,51 @@ mod tests {
 #[cfg(test)]
 mod suppression_tests {
     use super::*;
+
+    #[test]
+    fn suppression_comment_whitespace_variants_are_accepted() {
+        let expected = Some(vec!["missing-require-auth".to_string()]);
+        for line in [
+            "// soroban-guard: allow(missing-require-auth)",
+            "//soroban-guard: allow(missing-require-auth)",
+            "// soroban-guard:allow(missing-require-auth)",
+            "//  soroban-guard: allow(missing-require-auth)",
+            "// soroban-guard : allow(missing-require-auth)",
+            "//\tsoroban-guard:\tallow(missing-require-auth)",
+            "    // soroban-guard: allow(missing-require-auth)",
+        ] {
+            assert_eq!(parse_allow_checks(line), expected, "line: {line:?}");
+        }
+    }
+
+    #[test]
+    fn non_suppression_comments_are_rejected() {
+        for line in [
+            "/// soroban-guard: allow(missing-require-auth)",
+            "//! soroban-guard: allow(missing-require-auth)",
+            "// soroban-guard allow(missing-require-auth)",
+            "// soroban-guard: allow ()",
+            "// soroban-guardian: allow(missing-require-auth)",
+            "let x = 1; // soroban-guard: allow(missing-require-auth)",
+        ] {
+            assert_eq!(parse_allow_checks(line), None, "line: {line:?}");
+        }
+    }
+
+    #[test]
+    fn compact_suppression_comment_silences_the_function() {
+        let src = "\
+#[contract]
+pub struct C;
+#[contractimpl]
+impl C {
+    //soroban-guard:allow(missing-require-auth)
+    pub fn set_admin(env: Env, a: Address) { let _ = (env, a); }
+}
+";
+        let s = suppressions_for(src);
+        assert!(has_fn_suppression(&s, "set_admin", "missing-require-auth"));
+    }
 
     fn suppressions_for(src: &str) -> Suppressions {
         let file = syn::parse_file(src).expect("fixture should parse");

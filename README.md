@@ -95,6 +95,7 @@ List the checks that run by default:
 
 ```bash
 cargo run -p soroban-guard-cli -- list-checks
+cargo run -p soroban-guard-cli -- list-checks --json
 ```
 
 Emit a Markdown table (handy for PR comments or docs):
@@ -149,6 +150,12 @@ Generate shell completions (Bash, Zsh, Fish, or PowerShell):
 
 ```bash
 cargo run -p soroban-guard-cli -- completions zsh > _soroban-guard
+```
+
+Create a commented starter configuration file:
+
+```bash
+cargo run -p soroban-guard-cli -- init
 ```
 
 > Run `cargo run -p soroban-guard-cli -- scan --help` for the full, always-up-to-date flag reference.

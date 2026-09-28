@@ -11,7 +11,11 @@ env:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -30,6 +34,7 @@ jobs:
         run: cargo build --workspace --release
 
       - name: Check test-contracts fixtures
+        shell: bash
         run: |
           set -e
           for d in test-contracts/*/; do

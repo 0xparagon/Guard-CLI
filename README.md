@@ -133,6 +133,13 @@ cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --max-findings 5
 
 `--max-findings` caps how many findings the pretty formatter prints (the trailing summary still counts the full result set). Use `--max-findings 0` to show all findings — the default.
 
+Re-run the scan whenever a `.rs` file changes. The terminal is cleared between runs when output goes to a TTY; pass `--no-clear` to keep previous results on screen:
+
+```bash
+cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --watch
+cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --watch --no-clear
+```
+
 Print full documentation for a single check:
 
 ```bash
@@ -184,7 +191,7 @@ Guard-CLI/
 │       └── src/
 │           ├── lib.rs          # trait definition, Finding, Severity, default_checks()
 │           └── ...             # one module per detector; see docs/checks.md for the full list
-└── test-contracts/             # standalone Soroban crates (excluded from workspace)
+└── test-contracts/             # 68 standalone Soroban fixture crates (excluded from workspace)
     ├── vulnerable/             # triggers missing-require-auth
     ├── safe/                   # passes missing-require-auth
     ├── arithmetic-vulnerable/
@@ -192,7 +199,8 @@ Guard-CLI/
     ├── admin-vulnerable/
     ├── admin-safe/
     ├── storage-vulnerable/
-    └── storage-safe/
+    ├── storage-safe/
+    └── ...                     # paired safe/vulnerable fixtures for each implemented check
 ```
 
 ---
@@ -235,8 +243,8 @@ const KEY: Symbol = symbol_short!("owner");
 #[contractimpl]
 impl SafeContract {
     // ✅ Caller must be the authorized Address on Stellar
-    pub fn set_owner(env: Env, new_owner: Address) {
-        env.require_auth();
+    pub fn set_owner(env: Env, owner: Address, new_owner: Address) {
+        owner.require_auth();
         env.storage().instance().set(&KEY, &new_owner);
     }
 }
@@ -244,7 +252,7 @@ impl SafeContract {
 
 ### Adding a custom check
 
-Implement the `Check` trait in `crates/checks/src/` and register it in `default_checks()`:
+Implement the `Check` trait in `crates/checks/src/`, export it from the module, and register it in `all_checks_base()`:
 
 ```rust
 use crate::{Check, Finding};
@@ -263,14 +271,18 @@ impl Check for MyCustomCheck {
 ```
 
 ```rust
-// crates/checks/src/lib.rs — register it here
-pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
+// crates/checks/src/lib.rs — register it once here
+fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
     vec![
         // ...(existing checks)...
         Box::new(MyCustomCheck),   // 👈 add your check
     ]
 }
 ```
+
+`default_checks()` and `default_checks_with_config()` both derive their lists
+from `all_checks_base()`, so custom checks should not be registered in either
+wrapper directly.
 
 ---
 

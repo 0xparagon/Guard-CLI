@@ -1,6 +1,9 @@
 //! Privileged-style entrypoints without any `require_auth` / `require_auth_for_args` call.
 
-use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_storage};
+use crate::util::{
+    contractimpl_functions_excluding_test, pat_ident_name, receiver_chain_contains,
+    receiver_chain_contains_storage,
+};
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -183,21 +186,24 @@ impl<'ast> Visit<'ast> for AuthGateScan {
 }
 
 fn expr_references_any(expr: &syn::Expr, names: &std::collections::HashSet<String>) -> bool {
-    struct RefVisitor<'a>(&'a std::collections::HashSet<String>, bool);
+    struct RefVisitor<'a> {
+        names: &'a std::collections::HashSet<String>,
+        found: bool,
+    }
     impl<'a, 'ast> Visit<'ast> for RefVisitor<'a> {
         fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
             if node
                 .path
                 .segments
                 .last()
-                .is_some_and(|s| self.0.contains(&s.ident.to_string()))
+                .is_some_and(|s| self.names.contains(&s.ident.to_string()))
             {
-                self.1 = true;
+                self.found = true;
             }
             visit::visit_expr_path(self, node);
         }
     }
-    let mut v = RefVisitor(names, false);
+    let mut v = RefVisitor { names, found: false };
     visit::visit_expr(&mut v, expr);
     v.found
 }

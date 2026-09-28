@@ -54,6 +54,75 @@ impl Check for HardcodedAddressCheck {
     }
 }
 
+/// Returns the enclosing `#[contractimpl]` method name for a given source line, or
+/// `"module"` if the line falls outside any such method.
+fn enclosing_function(spans: &[(usize, usize, String)], line: usize) -> &str {
+    spans
+        .iter()
+        .find(|(start, end, _)| line >= *start && line <= *end)
+        .map(|(_, _, name)| name.as_str())
+        .unwrap_or("module")
+}
+
+/// Line-range/name triples for every `#[contractimpl]` method in the file.
+fn function_spans(file: &File) -> Vec<(usize, usize, String)> {
+    crate::util::contractimpl_functions_excluding_test(file)
+        .into_iter()
+        .map(|m| {
+            let start = m.span().start().line;
+            let end = m.span().end().line;
+            (start, end, m.sig.ident.to_string())
+        })
+        .collect()
+}
+
+/// Strips `//` and `/* ... */` comments from each line (block comments may span lines), so
+/// keys that only appear in a comment aren't reported as real string literals.
+fn effective_lines(source: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(source.lines().count());
+    let mut in_block_comment = false;
+    for line in source.lines() {
+        let mut effective = String::new();
+        let mut rest = line;
+        loop {
+            if in_block_comment {
+                match rest.find("*/") {
+                    Some(end) => {
+                        rest = &rest[end + 2..];
+                        in_block_comment = false;
+                    }
+                    None => break,
+                }
+            } else {
+                let line_comment = rest.find("//");
+                let block_comment = rest.find("/*");
+                match (line_comment, block_comment) {
+                    // A block comment starts strictly before any `//` on the
+                    // line (or there is no `//` at all): consume through
+                    // its `*/` (or the rest of the line, if unterminated)
+                    // and keep scanning what follows on this line.
+                    (lc, Some(bc)) if lc.map_or(true, |lc| bc < lc) => {
+                        effective.push_str(&rest[..bc]);
+                        rest = &rest[bc + 2..];
+                        in_block_comment = true;
+                    }
+                    // Otherwise a `//` (if any) is what ends the line.
+                    (Some(lc), _) => {
+                        effective.push_str(&rest[..lc]);
+                        break;
+                    }
+                    (None, _) => {
+                        effective.push_str(rest);
+                        break;
+                    }
+                }
+            }
+        }
+        out.push(effective);
+    }
+    out
+}
+
 fn is_strkey_char(b: u8) -> bool {
     b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b)
 }

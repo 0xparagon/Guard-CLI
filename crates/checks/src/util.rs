@@ -87,6 +87,7 @@ pub fn contractimpl_functions_with_type_excluding_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use syn::parse::Parser;
     use syn::parse_file;
 
     #[test]
@@ -210,6 +211,38 @@ mod integration {
         assert!(receiver_chain_contains_persistent(&get_call.receiver));
         Ok(())
     }
+
+    #[test]
+    fn pat_ident_name_reads_a_bare_binding() -> Result<(), syn::Error> {
+        // `Pat` has no blanket `Parse` impl (it exposes explicit
+        // `parse_single`/`parse_multi` associated functions instead), so it
+        // must be parsed through the `Parser` trait rather than
+        // `syn::parse_str::<Pat>`.
+        let pat = Pat::parse_single.parse_str("admin")?;
+        assert_eq!(pat_ident_name(&pat).as_deref(), Some("admin"));
+        Ok(())
+    }
+
+    #[test]
+    fn pat_ident_name_reads_a_type_ascribed_binding() -> Result<(), syn::Error> {
+        // `Pat::parse_single` parses only the pattern grammar itself; the
+        // `: Type` suffix that produces a `Pat::Type` is specific to where a
+        // pattern is *used* (a `let` binding, here), not to `Pat` parsing in
+        // general — so this needs a real `let` statement, matching how
+        // `pat_ident_name` actually receives its input (`local.pat`).
+        let syn::Stmt::Local(local) = syn::parse_str::<syn::Stmt>("let admin: Address = x;")? else {
+            panic!("expected a let-binding statement");
+        };
+        assert_eq!(pat_ident_name(&local.pat).as_deref(), Some("admin"));
+        Ok(())
+    }
+
+    #[test]
+    fn pat_ident_name_is_none_for_a_non_ident_pattern() -> Result<(), syn::Error> {
+        let pat = Pat::parse_single.parse_str("(a, b)")?;
+        assert_eq!(pat_ident_name(&pat), None);
+        Ok(())
+    }
 }
 
 /// Does the receiver chain of `expr` contain a call to `.<method>()`? Walks back through
@@ -323,6 +356,20 @@ pub fn type_is_address(ty: &Type) -> bool {
         return false;
     };
     tp.path.segments.last().is_some_and(|s| s.ident == "Address")
+}
+
+/// The bound name of a (possibly type-ascribed) pattern, e.g. `admin` from
+/// both `admin` and `admin: Address`. `None` for anything else (a tuple,
+/// wildcard, etc.) — those don't bind a single name a check could track.
+///
+/// Lives here once so every check that needs the name a `let` binds shares
+/// it, rather than each keeping its own private copy.
+pub(crate) fn pat_ident_name(pat: &Pat) -> Option<String> {
+    match pat {
+        Pat::Ident(ident) => Some(ident.ident.to_string()),
+        Pat::Type(pat_type) => pat_ident_name(&pat_type.pat),
+        _ => None,
+    }
 }
 
 /// Names of every `Address`-typed parameter.

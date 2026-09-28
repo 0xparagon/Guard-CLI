@@ -165,22 +165,24 @@ fn run_scan(
             };
 
             if let Some(result) = structured_payload {
-                if should_print_results(opts.quiet, should_fail) {
-                    match result {
-                        Ok(payload) => {
-                            if let Some(ref out_path) = opts.output {
-                                if let Err(e) = write_output(out_path, &payload) {
-                                    eprintln!("{} {}", "error:".red().bold(), e);
-                                    return 2;
-                                }
-                            } else {
-                                println!("{payload}");
+                match result {
+                    Ok(payload) => {
+                        // `--quiet` suppresses console text only; a requested `--output`
+                        // file is a build artifact and must always be written, whether
+                        // the scan passes or fails (Issue #625).
+                        if let Some(ref out_path) = opts.output {
+                            if let Err(e) = write_output(out_path, &payload) {
+                                eprintln!("{} {}", "error:".red().bold(), e);
+                                return 2;
                             }
                         }
-                        Err(e) => {
-                            eprintln!("{} {}", "error:".red().bold(), e);
-                            return 2;
+                        if opts.output.is_none() && should_print_results(opts.quiet, should_fail) {
+                            println!("{payload}");
                         }
+                    }
+                    Err(e) => {
+                        eprintln!("{} {}", "error:".red().bold(), e);
+                        return 2;
                     }
                 }
             } else if should_print_results(opts.quiet, should_fail) {
@@ -326,6 +328,15 @@ fn main() {
             if no_color || std::env::var_os("NO_COLOR").is_some() {
                 colored::control::set_override(false);
             }
+            // Mutual exclusion
+            let format_count = [json, sarif, markdown].iter().filter(|&&b| b).count();
+            if format_count > 1 {
+                eprintln!(
+                    "{} --json, --sarif, and --markdown are mutually exclusive",
+                    "error:".red().bold()
+                );
+                std::process::exit(2);
+            }
             // Try to load soroban-guard.toml from current directory to get default path.
             let config_for_default = match config::load(&PathBuf::from(".")) {
                 Ok(c) => c.unwrap_or_default(),
@@ -336,16 +347,30 @@ fn main() {
             };
 
             // Resolve scan path: CLI argument takes precedence, then config, then error.
+            // The current-directory config is only needed as a fallback for the scan
+            // path itself, so it's only loaded when no path argument was given -
+            // otherwise a malformed `./soroban-guard.toml` would abort scans of an
+            // unrelated, explicitly-provided path (Issue #626).
             let scan_path = if let Some(p) = path {
                 p
-            } else if let Some(config_path) = &config_for_default.scan.path {
-                PathBuf::from(config_path)
             } else {
-                eprintln!(
-                    "{} no scan path provided and none found in soroban-guard.toml",
-                    "error:".red().bold()
-                );
-                std::process::exit(2);
+                // Try to load soroban-guard.toml from current directory to get default path.
+                let config_for_default = match config::load(&PathBuf::from(".")) {
+                    Ok(c) => c.unwrap_or_default(),
+                    Err(e) => {
+                        eprintln!("{} {}", "error:".red().bold(), e);
+                        std::process::exit(2);
+                    }
+                };
+                if let Some(config_path) = &config_for_default.scan.path {
+                    PathBuf::from(config_path)
+                } else {
+                    eprintln!(
+                        "{} no scan path provided and none found in soroban-guard.toml",
+                        "error:".red().bold()
+                    );
+                    std::process::exit(2);
+                }
             };
 
             // Load soroban-guard.toml from the scan root (if present).
@@ -1012,7 +1037,9 @@ fn list_checks_json() -> Result<String, serde_json::Error> {
 }
 
 fn write_output(path: &Path, payload: &str) -> Result<(), std::io::Error> {
-    fs::write(path, payload)
+    // Match the println! convention used for stdout: append a trailing newline
+    // so file contents are byte-for-byte identical to what would be printed.
+    fs::write(path, format!("{payload}\n"))
 }
 
 /// Count findings bucketed by severity, returned as `(high, medium, low)`.

@@ -188,5 +188,6 @@ Fixture crates live under **`test-contracts/`** and are **excluded** from the ro
 - Prefer small visitors and helpers over monolithic passes.
 - Keep `--json` output stable for scripting.
 - When you change severity or rule IDs, update `docs/checks.md` in the same change.
+- Run `cargo fmt --all` before pushing so CI's `cargo fmt --all -- --check` step passes.
 
 Thank you for contributing.

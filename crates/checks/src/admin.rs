@@ -112,10 +112,6 @@ fn is_sensitive_name(name: &str, extra: &[String]) -> bool {
         || extra.iter().any(|e| e == name)
 }
 
-fn is_storage_read_call(m: &ExprMethodCall) -> bool {
-    m.method == "get" && receiver_chain_contains_storage(&m.receiver)
-}
-
 fn body_has_auth_gate(block: &Block, address_names: &[String]) -> bool {
     let mut v = AuthGateScan::new(address_names.to_vec());
     v.visit_block(block);
@@ -146,8 +142,6 @@ impl<'ast> Visit<'ast> for AuthGateScan {
         let m = i.method.to_string();
         if matches!(m.as_str(), "require_auth" | "require_auth_for_args") {
             self.found = true;
-        }
-        if is_storage_read_call(i) {
         }
         visit::visit_expr_method_call(self, i);
     }

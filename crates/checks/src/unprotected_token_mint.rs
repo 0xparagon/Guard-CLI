@@ -79,10 +79,10 @@ impl<'ast> Visit<'ast> for StorageMutationVisitor {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         if self.line.is_none() {
             let name = node.method.to_string();
-            if matches!(name.as_str(), "set" | "remove" | "extend_ttl" | "bump" | "append") {
-                if receiver_chain_contains_storage(&node.receiver) {
-                    self.line = Some(node.span().start().line);
-                }
+            if matches!(name.as_str(), "set" | "remove" | "extend_ttl" | "bump" | "append")
+                && receiver_chain_contains_storage(&node.receiver)
+            {
+                self.line = Some(node.span().start().line);
             }
         }
         visit::visit_expr_method_call(self, node);
@@ -136,10 +136,10 @@ impl<'ast> Visit<'ast> for AuthScanner {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if self.first_valid_auth_line.is_none() {
-            if is_valid_auth_call(node, &self.env_name, &self.address_names, &self.admin_vars) {
-                self.first_valid_auth_line = Some(node.span().start().line);
-            }
+        if self.first_valid_auth_line.is_none()
+            && is_valid_auth_call(node, &self.env_name, &self.address_names, &self.admin_vars)
+        {
+            self.first_valid_auth_line = Some(node.span().start().line);
         }
         visit::visit_expr_method_call(self, node);
     }

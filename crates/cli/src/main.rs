@@ -1,6 +1,6 @@
 use soroban_guard_cli::config;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::Colorize;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
@@ -26,6 +26,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Scan a directory tree for vulnerability patterns
+    #[command(group(
+        ArgGroup::new("output_format")
+            .args(["json", "sarif", "markdown"])
+            .multiple(false)
+    ))]
     Scan {
         /// Path to the contract crate or folder containing Rust sources (or use path from soroban-guard.toml)
         path: Option<PathBuf>,
@@ -65,12 +70,30 @@ enum Commands {
         /// Watch for .rs file changes and re-run the scan automatically
         #[arg(long, short = 'w')]
         watch: bool,
+        /// Do not clear the terminal between watch-mode scans
+        #[arg(long, hide = true)]
+        /// Don't clear the terminal between watch-mode re-scans
+        #[arg(long)]
+        no_clear: bool,
         /// Cap the number of findings printed to stdout (0 = unlimited, default: 0)
         #[arg(long, value_name = "N", default_value_t = 0)]
         max_findings: usize,
     },
     /// List the checks that are enabled by default
-    ListChecks,
+    ListChecks {
+        /// Emit machine-readable JSON instead of the default table
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a commented starter soroban-guard.toml file
+    Init {
+        /// Directory where soroban-guard.toml should be created
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Overwrite an existing soroban-guard.toml
+        #[arg(long)]
+        force: bool,
+    },
     /// Print full documentation for a named check
     Explain {
         /// Name of the check (e.g. `missing-require-auth`)
@@ -115,7 +138,7 @@ fn run_scan(
     active_checks: &[Box<dyn soroban_guard_checks::Check + Send + Sync>],
 ) -> i32 {
     match scan_directory_with_checks(&opts.path, &opts.exclude, &opts.includes, active_checks) {
-        Ok((results, files_scanned, files_skipped)) => {
+        Ok((results, files_scanned, files_skipped, _check_panics)) => {
             let findings: Vec<Finding> =
                 results.into_iter().flat_map(|r| r.findings).collect();
             let should_fail = findings
@@ -174,14 +197,15 @@ fn run_scan(
             if opts.verbose {
                 eprintln!("Scanned {} file(s).", files_scanned);
                 if files_skipped > 0 {
-                    eprintln!(
-                        "Skipped {} generated file(s) from analysis.",
-                        files_skipped
-                    );
+                    eprintln!("Skipped {} generated file(s) from analysis.", files_skipped);
                 }
             }
 
-            if should_fail { 1 } else { 0 }
+            if should_fail {
+                1
+            } else {
+                0
+            }
         }
         Err(e) => {
             if opts.json {
@@ -208,7 +232,52 @@ fn chrono_timestamp() -> String {
     let s = secs % 60;
     let m = (secs / 60) % 60;
     let h = (secs / 3600) % 24;
-    format!("{:02}:{:02}:{:02} UTC", h, m, s)
+    let days = secs / 86400;
+    let (year, month, day) = days_to_ymd(days);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        year, month, day, h, m, s
+    )
+}
+
+/// Convert days since Unix epoch (1970-01-01) to (year, month, day).
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    let mut year = 1970u64;
+    loop {
+        let days_in_year = if is_leap(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+    let months: [u64; 12] = [
+        31,
+        if is_leap(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 1u64;
+    for &dim in &months {
+        if days < dim {
+            break;
+        }
+        days -= dim;
+        month += 1;
+    }
+    (year, month, days + 1)
+}
+
+fn is_leap(year: u64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
 /// Parse a `--fail-on` / `min_severity` string into a `Severity`.
@@ -242,21 +311,12 @@ fn main() {
             fail_on,
             disable_check,
             watch,
+            no_clear,
             max_findings,
         } => {
             if no_color || std::env::var_os("NO_COLOR").is_some() {
                 colored::control::set_override(false);
             }
-            // Mutual exclusion
-            let format_count = [json, sarif, markdown].iter().filter(|&&b| b).count();
-            if format_count > 1 {
-                eprintln!(
-                    "{} --json, --sarif, and --markdown are mutually exclusive",
-                    "error:".red().bold()
-                );
-                std::process::exit(2);
-            }
-
             // Try to load soroban-guard.toml from current directory to get default path.
             let config_for_default = match config::load(&PathBuf::from(".")) {
                 Ok(c) => c.unwrap_or_default(),
@@ -372,14 +432,17 @@ fn main() {
 
                 let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
 
-                let mut watcher =
-                    notify::recommended_watcher(move |res| {
-                        let _ = tx.send(res);
-                    })
-                    .unwrap_or_else(|e| {
-                        eprintln!("{} failed to create file watcher: {}", "error:".red().bold(), e);
-                        std::process::exit(2);
-                    });
+                let mut watcher = notify::recommended_watcher(move |res| {
+                    let _ = tx.send(res);
+                })
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "{} failed to create file watcher: {}",
+                        "error:".red().bold(),
+                        e
+                    );
+                    std::process::exit(2);
+                });
 
                 watcher
                     .watch(&scan_path, RecursiveMode::Recursive)
@@ -402,9 +465,10 @@ fn main() {
                             let is_relevant = matches!(
                                 event.kind,
                                 EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                            ) && event.paths.iter().any(|p| {
-                                p.extension().map(|e| e == "rs").unwrap_or(false)
-                            });
+                            ) && event
+                                .paths
+                                .iter()
+                                .any(|p| p.extension().map(|e| e == "rs").unwrap_or(false));
 
                             if !is_relevant {
                                 continue;
@@ -418,7 +482,9 @@ fn main() {
                                     Ok(Ok(e)) => {
                                         let relevant = matches!(
                                             e.kind,
-                                            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                                            EventKind::Create(_)
+                                                | EventKind::Modify(_)
+                                                | EventKind::Remove(_)
                                         ) && e.paths.iter().any(|p| {
                                             p.extension().map(|x| x == "rs").unwrap_or(false)
                                         });
@@ -439,11 +505,8 @@ fn main() {
                             // format (--json / --sarif / --output).  Send to stderr so
                             // stdout stays clean for machine consumers.
                             let stdout_is_tty = std::io::stdout().is_terminal();
-                            let should_clear = !no_clear
-                                && !json
-                                && !sarif
-                                && output.is_none()
-                                && stdout_is_tty;
+                            let should_clear =
+                                !no_clear && !json && !sarif && output.is_none() && stdout_is_tty;
                             if should_clear {
                                 eprint!("\x1B[2J\x1B[1;1H");
                                 let _ = io::stderr().flush();
@@ -468,13 +531,55 @@ fn main() {
                 }
             }
         }
-        Commands::ListChecks => {
-            for check in default_checks() {
-                let (severity, description) = describe_check(check.name());
-                println!("{} | {} | {}", check.name(), severity, description);
+        Commands::ListChecks { json } => {
+            if json {
+                match list_checks_json() {
+                    Ok(payload) => println!("{payload}"),
+                    Err(e) => {
+                        eprintln!("{} {}", "error:".red().bold(), e);
+                        std::process::exit(2);
+                    }
+                }
+            } else {
+                for check in default_checks() {
+                    let (severity, description) = describe_check(check.name());
+                    println!("{} | {} | {}", check.name(), severity, description);
+                }
+                println!();
+                println!(
+                    "Run `soroban-guard explain <check-name>` for detailed documentation on any check."
+                );
             }
-            println!();
-            println!("Run `soroban-guard explain <check-name>` for detailed documentation on any check.");
+        }
+        Commands::Init { path, force } => {
+            let config_path = path.join("soroban-guard.toml");
+            if config_path.exists() && !force {
+                eprintln!(
+                    "{} {} already exists. Re-run with --force to overwrite it.",
+                    "error:".red().bold(),
+                    config_path.display()
+                );
+                std::process::exit(2);
+            }
+            if let Err(e) = fs::create_dir_all(&path) {
+                eprintln!(
+                    "{} could not create {}: {}",
+                    "error:".red().bold(),
+                    path.display(),
+                    e
+                );
+                std::process::exit(2);
+            }
+            if let Err(e) = write_output(&config_path, STARTER_CONFIG) {
+                eprintln!(
+                    "{} could not write {}: {}",
+                    "error:".red().bold(),
+                    config_path.display(),
+                    e
+                );
+                std::process::exit(2);
+            }
+            println!("Wrote {}", config_path.display());
         }
         Commands::Explain { check_name } => {
             let known = default_checks();
@@ -501,11 +606,31 @@ fn main() {
         }
         Commands::Version => {
             println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-            println!("target: {}-{}", std::env::consts::ARCH, std::env::consts::OS);
+            println!(
+                "target: {}-{}",
+                std::env::consts::ARCH,
+                std::env::consts::OS
+            );
         }
     }
 }
 
+const STARTER_CONFIG: &str = r#"# Soroban Guard project defaults.
+# CLI flags override values from this file.
+
+[scan]
+# Fail the scan when findings at or above this severity are present.
+# Allowed values: "high", "medium", "low".
+min_severity = "high"
+
+[checks]
+# Check names to skip entirely, as shown by `soroban-guard list-checks`.
+disabled = []
+
+[checks.sensitive_names]
+# Extra privileged function names for the unprotected-admin check.
+extra = []
+"#;
 
 /// Returns (slice to display, count of truncated findings).
 fn truncate(findings: &[Finding], max: usize) -> (&[Finding], usize) {
@@ -856,6 +981,22 @@ fn describe_check(name: &str) -> (&'static str, &'static str) {
         .unwrap_or(("low", "Custom detector"))
 }
 
+fn list_checks_json() -> Result<String, serde_json::Error> {
+    let checks = default_checks()
+        .into_iter()
+        .map(|check| {
+            let (severity, description) = describe_check(check.name());
+            serde_json::json!({
+                "name": check.name(),
+                "severity": severity,
+                "description": description,
+                "rule": describe_rule(check.name()),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string_pretty(&serde_json::json!({ "checks": checks }))
+}
+
 fn write_output(path: &Path, payload: &str) -> Result<(), std::io::Error> {
     fs::write(path, payload)
 }
@@ -878,7 +1019,11 @@ fn severity_counts(findings: &[Finding]) -> (usize, usize, usize) {
     (high, medium, low)
 }
 
-fn json_payload(findings: &[Finding], files_scanned: usize, files_skipped: usize) -> Result<String, serde_json::Error> {
+fn json_payload(
+    findings: &[Finding],
+    files_scanned: usize,
+    files_skipped: usize,
+) -> Result<String, serde_json::Error> {
     let (high, medium, low) = severity_counts(findings);
 
     let envelope = serde_json::json!({
@@ -1003,10 +1148,7 @@ fn print_pretty(
         println!();
     } else {
         let total = display.len() + truncated_count;
-        println!(
-            "  {} finding(s):\n",
-            total.to_string().yellow().bold()
-        );
+        println!("  {} finding(s):\n", total.to_string().yellow().bold());
 
         for (i, f) in display.iter().enumerate() {
             let sev = match f.severity {
@@ -1347,7 +1489,10 @@ mod tests {
         let (display, truncated) = truncate(&findings, 0);
         assert_eq!(display.len(), 2, "max 0 must not truncate");
         assert_eq!(truncated, 0);
-        assert!(std::ptr::eq(display, &findings[..]), "max 0 should return the full slice");
+        assert!(
+            std::ptr::eq(display, &findings[..]),
+            "max 0 should return the full slice"
+        );
     }
 
     #[test]
@@ -1384,16 +1529,31 @@ mod tests {
         let high = style_check_name("high-check", Severity::High);
         let low = style_check_name("low-check", Severity::Low);
 
-        assert!(high.contains("\u{1b}[1;31m"), "high check name should be bold red");
-        assert!(low.contains("\u{1b}[2;37m"), "low check name should be dimmed white");
+        assert!(
+            high.contains("\u{1b}[1;31m"),
+            "high check name should be bold red"
+        );
+        assert!(
+            low.contains("\u{1b}[2;37m"),
+            "low check name should be dimmed white"
+        );
     }
 
     #[test]
     fn describe_check_covers_all_default_checks() {
         for check in default_checks() {
             let (sev, desc) = describe_check(check.name());
-            assert!(matches!(sev, "high" | "medium" | "low"), "check {} has invalid severity metadata", check.name());
-            assert_ne!(desc, "Custom detector", "check {} has fallback description", check.name());
+            assert!(
+                matches!(sev, "high" | "medium" | "low"),
+                "check {} has invalid severity metadata",
+                check.name()
+            );
+            assert_ne!(
+                desc,
+                "Custom detector",
+                "check {} has fallback description",
+                check.name()
+            );
         }
     }
 
@@ -1401,7 +1561,12 @@ mod tests {
     fn describe_rule_covers_all_default_checks() {
         for check in default_checks() {
             let desc = describe_rule(check.name());
-            assert_ne!(desc, "Custom check", "check {} has fallback rule description", check.name());
+            assert_ne!(
+                desc,
+                "Custom check",
+                "check {} has fallback rule description",
+                check.name()
+            );
         }
     }
 
@@ -1418,8 +1583,15 @@ mod tests {
                 matches!(sev, "high" | "medium" | "low"),
                 "check {name} has invalid severity metadata"
             );
-            assert_ne!(short, "Custom detector", "check {name} has fallback short description");
-            assert_ne!(describe_rule(name), "Custom check", "check {name} has fallback rule description");
+            assert_ne!(
+                short, "Custom detector",
+                "check {name} has fallback short description"
+            );
+            assert_ne!(
+                describe_rule(name),
+                "Custom check",
+                "check {name} has fallback rule description"
+            );
             assert_ne!(
                 explain_details(name),
                 "No detailed explanation is available for this custom check.",
@@ -1433,18 +1605,24 @@ mod tests {
     /// let `uninitialized-storage-read` report `medium` while the check emits `High`.
     #[test]
     fn describe_check_severity_matches_docs() {
-        let docs = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/checks.md"
-        ))
-        .expect("docs/checks.md should be readable from the workspace");
+        let docs =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/checks.md"))
+                .expect("docs/checks.md should be readable from the workspace");
 
         let mut documented: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for line in docs.lines() {
-            let Some(rest) = line.strip_prefix("## `") else { continue };
-            let Some((name, tail)) = rest.split_once('`') else { continue };
-            let Some(sev) = tail.trim().strip_prefix('(').and_then(|s| s.strip_suffix(')')) else {
+            let Some(rest) = line.strip_prefix("## `") else {
+                continue;
+            };
+            let Some((name, tail)) = rest.split_once('`') else {
+                continue;
+            };
+            let Some(sev) = tail
+                .trim()
+                .strip_prefix('(')
+                .and_then(|s| s.strip_suffix(')'))
+            else {
                 continue;
             };
             documented.insert(name.to_string(), sev.to_ascii_lowercase());
@@ -1456,7 +1634,9 @@ mod tests {
             if name == "unchecked-arithmetic" {
                 continue;
             }
-            let Some(doc_sev) = documented.get(name) else { continue };
+            let Some(doc_sev) = documented.get(name) else {
+                continue;
+            };
             let (table_sev, _) = describe_check(name);
             assert_eq!(
                 table_sev, doc_sev,
@@ -1504,8 +1684,14 @@ mod tests {
     fn parse_fail_on_rejects_unknown_string() {
         assert!(parse_fail_on("medim").is_err(), "typo should be rejected");
         assert!(parse_fail_on("none").is_err(), "'none' should be rejected");
-        assert!(parse_fail_on("critical").is_err(), "'critical' should be rejected");
-        assert!(parse_fail_on("").is_err(), "empty string should be rejected");
+        assert!(
+            parse_fail_on("critical").is_err(),
+            "'critical' should be rejected"
+        );
+        assert!(
+            parse_fail_on("").is_err(),
+            "empty string should be rejected"
+        );
     }
 
     // ── CLI integration: bad --fail-on exits 2 ───────────────────────────────
@@ -1518,7 +1704,10 @@ mod tests {
 
         // If the binary hasn't been built yet, skip rather than panic.
         if !bin.exists() {
-            eprintln!("note: skipping bad_fail_on_flag_exits_2 — binary not found at {}", bin.display());
+            eprintln!(
+                "note: skipping bad_fail_on_flag_exits_2 — binary not found at {}",
+                bin.display()
+            );
             return;
         }
 

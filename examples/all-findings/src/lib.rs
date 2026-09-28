@@ -158,6 +158,12 @@ impl AllFindingsContract {
             .unwrap()
     }
 
+    // Triggers `panic-in-contract`: `.unwrap()` on a plain `Option` (not a storage read)
+    // aborts the invocation with an unhelpful error.
+    pub fn fee_or_panic(_env: Env, fee: Option<u32>) -> u32 {
+        fee.unwrap()
+    }
+
     // Triggers `reentrancy-risk`: storage write is followed by an external contract call.
     pub fn write_then_call(env: Env, callee: Address, value: i128) {
         env.storage().persistent().set(&symbol_short!("rent"), &value);

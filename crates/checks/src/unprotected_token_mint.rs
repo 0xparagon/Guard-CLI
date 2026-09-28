@@ -1,8 +1,11 @@
-use crate::util::{self, contractimpl_functions_excluding_test};
+use crate::util::{
+    self, contractimpl_functions_excluding_test, env_param_name, pat_ident_name,
+    receiver_chain_contains, receiver_chain_contains_storage,
+};
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Block, Expr, ExprMethodCall, Pat};
+use syn::{Block, Expr, ExprMethodCall};
 
 const CHECK_NAME: &str = "unprotected-token-mint";
 const MINT_NAMES: &[&str] = &["mint", "burn", "issue", "redeem", "create_tokens"];
@@ -142,14 +145,6 @@ impl<'ast> Visit<'ast> for AuthScanner {
     }
 }
 
-fn pat_ident_name(pat: &Pat) -> Option<String> {
-    match pat {
-        Pat::Ident(ident) => Some(ident.ident.to_string()),
-        Pat::Type(pat_type) => pat_ident_name(&pat_type.pat),
-        _ => None,
-    }
-}
-
 fn is_valid_auth_call(
     method_call: &ExprMethodCall,
     env_name: &str,
@@ -195,6 +190,8 @@ impl C {
         let check = UnprotectedTokenMintCheck;
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].function_name, "mint");
+        assert_eq!(findings[0].line, 5);
         Ok(())
     }
 

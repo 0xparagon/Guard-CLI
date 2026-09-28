@@ -14,8 +14,13 @@ fn fixture_path(name: &str) -> PathBuf {
 }
 
 fn assert_fixture_pair(base: &str, expected_check: &str) {
-    let (vulnerable, _, _) = scan_directory(&fixture_path(&format!("{base}-vulnerable")), &[], &[])
-        .unwrap_or_else(|error| panic!("failed to scan {base}-vulnerable: {error}"));
+    let (vulnerable, _, _, vulnerable_panics) =
+        scan_directory(&fixture_path(&format!("{base}-vulnerable")), &[], &[])
+            .unwrap_or_else(|error| panic!("failed to scan {base}-vulnerable: {error}"));
+    assert!(
+        vulnerable_panics.is_empty(),
+        "no check should panic on {base}-vulnerable; got: {vulnerable_panics:#?}"
+    );
     assert!(
         vulnerable
             .iter()
@@ -23,8 +28,12 @@ fn assert_fixture_pair(base: &str, expected_check: &str) {
         "{base}-vulnerable did not produce {expected_check}; findings: {vulnerable:#?}"
     );
 
-    let (safe, _, _) = scan_directory(&fixture_path(&format!("{base}-safe")), &[], &[])
+    let (safe, _, _, safe_panics) = scan_directory(&fixture_path(&format!("{base}-safe")), &[], &[])
         .unwrap_or_else(|error| panic!("failed to scan {base}-safe: {error}"));
+    assert!(
+        safe_panics.is_empty(),
+        "no check should panic on {base}-safe; got: {safe_panics:#?}"
+    );
     assert!(
         safe.iter()
             .all(|finding| finding.check_name != expected_check),
@@ -34,7 +43,7 @@ fn assert_fixture_pair(base: &str, expected_check: &str) {
 
 #[test]
 fn missing_require_auth_fixtures() {
-    let (vulnerable, _, _) = scan_directory(&fixture_path("vulnerable"), &[], &[])
+    let (vulnerable, _, _, _) = scan_directory(&fixture_path("vulnerable"), &[], &[])
         .unwrap_or_else(|error| panic!("failed to scan vulnerable: {error}"));
     assert!(
         vulnerable
@@ -43,7 +52,7 @@ fn missing_require_auth_fixtures() {
         "vulnerable did not produce missing-require-auth; findings: {vulnerable:#?}"
     );
 
-    let (safe, _, _) = scan_directory(&fixture_path("safe"), &[], &[])
+    let (safe, _, _, _) = scan_directory(&fixture_path("safe"), &[], &[])
         .unwrap_or_else(|error| panic!("failed to scan safe: {error}"));
     assert!(
         safe.iter()
@@ -85,7 +94,7 @@ fn reentrancy_fixtures() {
 #[test]
 fn cli_scan_path_does_not_emit_duplicate_findings() {
     let checks = default_checks_with_config(&[], &[]);
-    let (results, _, _) = scan_directory_with_checks(
+    let (results, _, _, _) = scan_directory_with_checks(
         &fixture_path("reentrancy-vulnerable"),
         &[],
         &[],
@@ -194,7 +203,7 @@ fn input_length_fixtures() {
 #[test]
 fn ttl_mixed_key_scenario_produces_finding() {
     let path = fixture_path("ttl-vulnerable");
-    let (findings, _, _) = scan_directory(&path, &[], &[])
+    let (findings, _, _, _) = scan_directory(&path, &[], &[])
         .expect("failed to scan ttl-vulnerable");
 
     // The `update` function writes KEY and KEY2 but only extends TTL for KEY2.
@@ -256,7 +265,7 @@ extra = ["drain"]
 
     // Without config: `drain` should NOT be flagged.
     let checks_no_cfg = default_checks_with_config(&[], &[]);
-    let (results_no_cfg, _, _) =
+    let (results_no_cfg, _, _, _) =
         scan_directory_with_checks(&root, &[], &[], &checks_no_cfg).unwrap();
     let findings_no_cfg: Vec<_> = results_no_cfg
         .iter()
@@ -270,7 +279,7 @@ extra = ["drain"]
 
     // With config extra name: `drain` SHOULD be flagged.
     let checks_with_cfg = default_checks_with_config(&[], &["drain".to_string()]);
-    let (results_with_cfg, _, _) =
+    let (results_with_cfg, _, _, _) =
         scan_directory_with_checks(&root, &[], &[], &checks_with_cfg).unwrap();
     let findings_with_cfg: Vec<_> = results_with_cfg
         .iter()
@@ -337,7 +346,7 @@ path = "src"
         _ => panic!("Should load config with path"),
     };
 
-    let (findings, _, _) = scan_directory(&config_root, &[], &[]).unwrap();
+    let (findings, _, _, _) = scan_directory(&config_root, &[], &[]).unwrap();
     assert!(
         findings
             .iter()

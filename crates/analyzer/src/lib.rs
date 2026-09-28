@@ -15,8 +15,6 @@ use syn::spanned::Spanned;
 use thiserror::Error;
 use walkdir::WalkDir;
 
-const SUPPRESSION_PREFIX: &str = "// soroban-guard: allow(";
-
 /// The source line range of one `#[contractimpl]` method, paired with its enclosing type's
 /// name — used to scope function-level suppressions to the specific `impl` block they were
 /// written above, instead of matching any same-named method anywhere in the file.
@@ -82,7 +80,11 @@ pub struct CheckPanic {
 impl From<&ScanError> for CheckPanic {
     fn from(err: &ScanError) -> Self {
         match err {
-            ScanError::CheckPanic { check, path, message } => CheckPanic {
+            ScanError::CheckPanic {
+                check,
+                path,
+                message,
+            } => CheckPanic {
                 check: check.clone(),
                 path: path.clone(),
                 message: message.clone(),
@@ -167,9 +169,14 @@ fn has_generated_file_header(path: &Path) -> Result<bool, std::io::Error> {
     Ok(false)
 }
 
+/// Parses `// soroban-guard: allow(a, b)`. Whitespace is optional after `//` and on
+/// either side of `:` (`//soroban-guard:allow(x)` and `//  soroban-guard : allow(x)` are
+/// accepted); `///` and `//!` doc comments are not suppressions.
 fn parse_allow_checks(line: &str) -> Option<Vec<String>> {
-    let trimmed = line.trim_start();
-    let rest = trimmed.strip_prefix(SUPPRESSION_PREFIX)?;
+    let rest = line.trim_start().strip_prefix("//")?.trim_start();
+    let rest = rest.strip_prefix("soroban-guard")?.trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix("allow(")?;
     let (inside, _) = rest.split_once(')')?;
     let checks: Vec<String> = inside
         .split(',')
@@ -401,9 +408,7 @@ fn collect_rust_paths(
             // path and skip it, matching the warn-and-continue precedent for check panics.
             Err(e) => {
                 let err = match &e {
-                    ScanError::Io(io)
-                        if io.kind() == std::io::ErrorKind::PermissionDenied =>
-                    {
+                    ScanError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied => {
                         ScanError::PermissionDenied {
                             path: path.to_path_buf(),
                         }
@@ -414,7 +419,6 @@ fn collect_rust_paths(
                 continue;
             }
         }
-        paths.push(path.to_path_buf());
     }
 
     Ok((paths, files_skipped))
@@ -433,17 +437,7 @@ fn run_checks_for_file(
         path: path.to_path_buf(),
         message: e.to_string(),
     })?;
-    let file_label = if root.is_file() {
-        path.file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-    } else {
-        path.strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string()
-    };
+    let file_label = file_label(path, root);
     let fn_spans = build_fn_spans(&syn_file);
     let suppressions = parse_suppressions(&content, &fn_spans);
 
@@ -555,23 +549,18 @@ pub fn scan_directory_with_checks(
         .par_iter()
         .map(|path| {
             let (findings, check_panics) = run_checks_for_file(path, &root, checks)?;
-            let file_label = if root.is_file() {
-                path.file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string()
-            } else {
-                path.strip_prefix(&root)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .to_string()
-            };
-            Ok((FileScanResult { file_path: file_label, findings }, check_panics))
+            let file_label = file_label(path, &root);
+            Ok((
+                FileScanResult {
+                    file_path: file_label,
+                    findings,
+                },
+                check_panics,
+            ))
         })
         .collect::<Result<Vec<_>, ScanError>>()?;
 
-    let mut results: Vec<FileScanResult> =
-        per_file.iter().map(|(r, _)| r.clone()).collect();
+    let mut results: Vec<FileScanResult> = per_file.iter().map(|(r, _)| r.clone()).collect();
     results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
 
     let check_panics: Vec<ScanError> = per_file
@@ -580,6 +569,22 @@ pub fn scan_directory_with_checks(
         .collect();
 
     Ok((results, files_scanned, files_skipped, check_panics))
+}
+
+fn path_to_report_string(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+fn file_label(path: &Path, root: &Path) -> String {
+    if root.is_file() {
+        path.file_name()
+            .map(Path::new)
+            .map(path_to_report_string)
+            .unwrap_or_default()
+    } else {
+        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
+    }
 }
 
 /// Scan an explicit list of `.rs` file paths and aggregate findings from every default check.
@@ -652,7 +657,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "soroban-guard-singlefile-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&dir).unwrap();
         let file_path = dir.join("lib.rs");
@@ -751,6 +759,95 @@ mod tests {
         let (_, files_scanned, files_skipped, _) = scan_directory(&root, &[], &[]).unwrap();
 
         assert_eq!(files_scanned, 0);
+        assert_eq!(files_skipped, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // #576 regression guard: `collect_rust_paths` had an unconditional
+    // `paths.push(...)` after the verdict `match`, so every `Scan` file was
+    // pushed twice, every `Reject` file (an exclude/include mismatch) was
+    // pushed anyway, and every `GeneratedSkip` file was pushed anyway too.
+    // The four tests below call `collect_rust_paths` directly so a
+    // regression shows up on the raw path list, not just on aggregate
+    // counts that could look right by coincidence.
+
+    #[test]
+    fn collect_rust_paths_has_no_duplicates() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-collect-nodup-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn f() {}").unwrap();
+
+        let (paths, files_skipped) = collect_rust_paths(&root, &[], &[]).unwrap();
+
+        assert_eq!(
+            paths.len(),
+            1,
+            "a Scan-verdict file must appear exactly once, not once per push site"
+        );
+        assert_eq!(files_skipped, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn collect_rust_paths_exclude_glob_removes_the_matching_file() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-collect-exclude-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/keep.rs"), "pub fn keep() {}").unwrap();
+        fs::write(root.join("src/drop.rs"), "pub fn drop_me() {}").unwrap();
+
+        let (paths, _) =
+            collect_rust_paths(&root, &["src/drop.rs".to_string()], &[]).unwrap();
+
+        assert_eq!(paths, vec![root.join("src/keep.rs")]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn collect_rust_paths_include_glob_restricts_to_the_matching_file() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-collect-include-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/a.rs"), "pub fn a() {}").unwrap();
+        fs::write(root.join("src/b.rs"), "pub fn b() {}").unwrap();
+
+        let (paths, _) =
+            collect_rust_paths(&root, &[], &["src/a.rs".to_string()]).unwrap();
+
+        assert_eq!(paths, vec![root.join("src/a.rs")]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn collect_rust_paths_skips_a_generated_file_and_does_not_return_it() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-collect-generated-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "// @generated\npub fn generated() {}\n",
+        )
+        .unwrap();
+
+        let (paths, files_skipped) = collect_rust_paths(&root, &[], &[]).unwrap();
+
+        assert!(
+            paths.is_empty(),
+            "a GeneratedSkip file must not appear in the returned path list"
+        );
         assert_eq!(files_skipped, 1);
         fs::remove_dir_all(root).unwrap();
     }
@@ -918,19 +1015,13 @@ mod tests {
 
         // Remove read+execute permission from the subdirectory so WalkDir cannot
         // list its contents.
-        fs::set_permissions(
-            root.join("src/private"),
-            fs::Permissions::from_mode(0o000),
-        )
-        .unwrap();
+        fs::set_permissions(root.join("src/private"), fs::Permissions::from_mode(0o000)).unwrap();
 
         // If the process can still read the dir (running as root), the scenario
         // under test does not apply; skip gracefully.
         if root.join("src/private").read_dir().is_ok() {
-            let _ = fs::set_permissions(
-                root.join("src/private"),
-                fs::Permissions::from_mode(0o755),
-            );
+            let _ =
+                fs::set_permissions(root.join("src/private"), fs::Permissions::from_mode(0o755));
             fs::remove_dir_all(&root).unwrap();
             return;
         }
@@ -938,10 +1029,7 @@ mod tests {
         let result = scan_directory(&root, &[], &[]);
 
         // Restore permissions before any assertion so the temp dir can be cleaned up.
-        let _ = fs::set_permissions(
-            root.join("src/private"),
-            fs::Permissions::from_mode(0o755),
-        );
+        let _ = fs::set_permissions(root.join("src/private"), fs::Permissions::from_mode(0o755));
         fs::remove_dir_all(&root).unwrap();
 
         assert!(
@@ -1048,19 +1136,25 @@ mod tests {
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src/lib.rs"), "pub fn f() {}").unwrap();
 
-        let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> = vec![
-            Box::new(PanickingCheck),
-            Box::new(OkCheck),
-        ];
+        let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> =
+            vec![Box::new(PanickingCheck), Box::new(OkCheck)];
         let (results, _, _, check_panics) =
             scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
 
         let total: usize = results.iter().map(|r| r.findings.len()).sum();
         assert_eq!(total, 1, "the non-panicking check's finding must survive");
 
-        assert_eq!(check_panics.len(), 1, "the panic must be returned to the caller");
+        assert_eq!(
+            check_panics.len(),
+            1,
+            "the panic must be returned to the caller"
+        );
         match &check_panics[0] {
-            ScanError::CheckPanic { check, path, message } => {
+            ScanError::CheckPanic {
+                check,
+                path,
+                message,
+            } => {
                 assert_eq!(check, "panic-check");
                 assert!(path.to_string_lossy().ends_with("src/lib.rs"));
                 assert!(message.contains("boom from panic-check"), "got {message}");
@@ -1080,6 +1174,51 @@ mod tests {
 #[cfg(test)]
 mod suppression_tests {
     use super::*;
+
+    #[test]
+    fn suppression_comment_whitespace_variants_are_accepted() {
+        let expected = Some(vec!["missing-require-auth".to_string()]);
+        for line in [
+            "// soroban-guard: allow(missing-require-auth)",
+            "//soroban-guard: allow(missing-require-auth)",
+            "// soroban-guard:allow(missing-require-auth)",
+            "//  soroban-guard: allow(missing-require-auth)",
+            "// soroban-guard : allow(missing-require-auth)",
+            "//\tsoroban-guard:\tallow(missing-require-auth)",
+            "    // soroban-guard: allow(missing-require-auth)",
+        ] {
+            assert_eq!(parse_allow_checks(line), expected, "line: {line:?}");
+        }
+    }
+
+    #[test]
+    fn non_suppression_comments_are_rejected() {
+        for line in [
+            "/// soroban-guard: allow(missing-require-auth)",
+            "//! soroban-guard: allow(missing-require-auth)",
+            "// soroban-guard allow(missing-require-auth)",
+            "// soroban-guard: allow ()",
+            "// soroban-guardian: allow(missing-require-auth)",
+            "let x = 1; // soroban-guard: allow(missing-require-auth)",
+        ] {
+            assert_eq!(parse_allow_checks(line), None, "line: {line:?}");
+        }
+    }
+
+    #[test]
+    fn compact_suppression_comment_silences_the_function() {
+        let src = "\
+#[contract]
+pub struct C;
+#[contractimpl]
+impl C {
+    //soroban-guard:allow(missing-require-auth)
+    pub fn set_admin(env: Env, a: Address) { let _ = (env, a); }
+}
+";
+        let s = suppressions_for(src);
+        assert!(has_fn_suppression(&s, "set_admin", "missing-require-auth"));
+    }
 
     fn suppressions_for(src: &str) -> Suppressions {
         let file = syn::parse_file(src).expect("fixture should parse");
@@ -1247,7 +1386,10 @@ impl C {
         let root = std::env::temp_dir().join(format!(
             "soroban-guard-suppress-e2e-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(
@@ -1269,7 +1411,7 @@ impl C {
 
         let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> =
             vec![Box::new(soroban_guard_checks::UncheckedDivisorCheck)];
-        let (results, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+        let (results, _, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
 
         let divisor_findings: usize = results
             .iter()
@@ -1295,7 +1437,9 @@ mod dedup_tests {
     /// A check that always returns two identical findings for every file it sees.
     struct DuplicatingCheck;
     impl soroban_guard_checks::Check for DuplicatingCheck {
-        fn name(&self) -> &str { "dup-check" }
+        fn name(&self) -> &str {
+            "dup-check"
+        }
         fn run(&self, _file: &syn::File, _src: &str) -> Vec<Finding> {
             let f = Finding {
                 check_name: "dup-check".into(),
@@ -1316,7 +1460,10 @@ mod dedup_tests {
         let root = std::env::temp_dir().join(format!(
             "soroban-guard-dedup-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src/lib.rs"), "pub fn f() {}").unwrap();
@@ -1334,7 +1481,9 @@ mod dedup_tests {
     /// A check that returns two findings at different lines, intentionally reversed.
     struct ReversedCheck;
     impl soroban_guard_checks::Check for ReversedCheck {
-        fn name(&self) -> &str { "reversed-check" }
+        fn name(&self) -> &str {
+            "reversed-check"
+        }
         fn run(&self, _file: &syn::File, _src: &str) -> Vec<Finding> {
             vec![
                 Finding {
@@ -1366,7 +1515,10 @@ mod dedup_tests {
         let root = std::env::temp_dir().join(format!(
             "soroban-guard-sort-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(root.join("src")).unwrap();
         // Two files — rayon may process them in any order.
@@ -1436,7 +1588,10 @@ mod dedup_tests {
         let root = std::env::temp_dir().join(format!(
             "soroban-guard-dedup-distinct-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src/lib.rs"), "pub fn f() {}").unwrap();
@@ -1446,7 +1601,10 @@ mod dedup_tests {
         let (results, _, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
 
         let total: usize = results.iter().map(|r| r.findings.len()).sum();
-        assert_eq!(total, 2, "distinct same-line findings must both survive dedup, got {total}");
+        assert_eq!(
+            total, 2,
+            "distinct same-line findings must both survive dedup, got {total}"
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -1459,7 +1617,10 @@ mod dedup_tests {
         let root = std::env::temp_dir().join(format!(
             "soroban-guard-auth-dedup-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(
@@ -1483,7 +1644,7 @@ mod dedup_tests {
         .unwrap();
 
         let checks = soroban_guard_checks::default_checks_with_config(&[], &[]);
-        let (results, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+        let (results, _, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
 
         let auth_after_write_count: usize = results
             .iter()

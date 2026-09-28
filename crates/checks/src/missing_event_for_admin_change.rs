@@ -115,6 +115,8 @@ impl C {
         let check = MissingEventForAdminChangeCheck;
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].function_name, "set_owner");
+        assert_eq!(findings[0].line, 4);
         Ok(())
     }
 

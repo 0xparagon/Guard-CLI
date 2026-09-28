@@ -308,6 +308,11 @@ pub fn default_checks_with_config(
     checks
 }
 
+// Not `mod tests`: this file already has one `#[cfg(test)] mod tests` block
+// above (testing `default_checks`/`default_checks_with_config`); a second
+// module with the same name is a hard compile error (E0428), which was
+// blocking `cargo test` for the entire crate regardless of which check's
+// tests were requested.
 #[cfg(test)]
 mod finding_tests {
     use super::{default_checks, ensure_unique_check_names, Check, MissingRequireAuthCheck};

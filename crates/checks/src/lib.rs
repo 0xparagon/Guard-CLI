@@ -260,7 +260,7 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
 }
 
 #[cfg(test)]
-mod tests {
+mod registry_tests {
     use super::{default_checks, default_checks_with_config};
 
     #[test]
@@ -309,7 +309,7 @@ pub fn default_checks_with_config(
 }
 
 #[cfg(test)]
-mod tests {
+mod finding_tests {
     use super::{default_checks, ensure_unique_check_names, Check, MissingRequireAuthCheck};
     use syn::parse_file;
 

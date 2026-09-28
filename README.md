@@ -236,8 +236,8 @@ const KEY: Symbol = symbol_short!("owner");
 #[contractimpl]
 impl SafeContract {
     // ✅ Caller must be the authorized Address on Stellar
-    pub fn set_owner(env: Env, new_owner: Address) {
-        env.require_auth();
+    pub fn set_owner(env: Env, owner: Address, new_owner: Address) {
+        owner.require_auth();
         env.storage().instance().set(&KEY, &new_owner);
     }
 }
@@ -245,7 +245,7 @@ impl SafeContract {
 
 ### Adding a custom check
 
-Implement the `Check` trait in `crates/checks/src/` and register it in `default_checks()`:
+Implement the `Check` trait in `crates/checks/src/`, export it from the module, and register it in `all_checks_base()`:
 
 ```rust
 use crate::{Check, Finding};
@@ -264,14 +264,18 @@ impl Check for MyCustomCheck {
 ```
 
 ```rust
-// crates/checks/src/lib.rs — register it here
-pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
+// crates/checks/src/lib.rs — register it once here
+fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
     vec![
         // ...(existing checks)...
         Box::new(MyCustomCheck),   // 👈 add your check
     ]
 }
 ```
+
+`default_checks()` and `default_checks_with_config()` both derive their lists
+from `all_checks_base()`, so custom checks should not be registered in either
+wrapper directly.
 
 ---
 

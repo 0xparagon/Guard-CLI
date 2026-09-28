@@ -222,8 +222,7 @@ fn run_scan(
     }
 }
 
-/// Returns a UTC timestamp string like "2026-07-28 23:09:36" without any
-/// external date crate.
+/// Returns a UTC time string like "23:09:36 UTC" without any external date crate.
 fn chrono_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()

@@ -184,7 +184,7 @@ Guard-CLI/
 │       └── src/
 │           ├── lib.rs          # trait definition, Finding, Severity, default_checks()
 │           └── ...             # one module per detector; see docs/checks.md for the full list
-└── test-contracts/             # standalone Soroban crates (excluded from workspace)
+└── test-contracts/             # 68 standalone Soroban fixture crates (excluded from workspace)
     ├── vulnerable/             # triggers missing-require-auth
     ├── safe/                   # passes missing-require-auth
     ├── arithmetic-vulnerable/
@@ -192,7 +192,8 @@ Guard-CLI/
     ├── admin-vulnerable/
     ├── admin-safe/
     ├── storage-vulnerable/
-    └── storage-safe/
+    ├── storage-safe/
+    └── ...                     # paired safe/vulnerable fixtures for each implemented check
 ```
 
 ---

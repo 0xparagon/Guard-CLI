@@ -62,8 +62,8 @@ enum Commands {
         #[arg(long, value_name = "PATTERN")]
         exclude: Vec<String>,
         /// Exit code 1 when findings at or above this severity are found (high|medium|low, default: high)
-        #[arg(long, default_value = "high")]
-        fail_on: String,
+        #[arg(long)]
+        fail_on: Option<String>,
         /// Disable a named check (may be repeated)
         #[arg(long, value_name = "CHECK")]
         disable_check: Vec<String>,
@@ -382,11 +382,16 @@ fn main() {
                 }
             };
 
-            // CLI --fail-on takes precedence; fall back to config min_severity.
-            let effective_fail_on = if fail_on != "high" {
-                fail_on.clone()
+            // CLI --fail-on takes precedence over config min_severity.
+            // Because --fail-on is now Option<String>, Some(_) always means the
+            // user explicitly set the flag (even --fail-on high), while None means
+            // they did not — so we can correctly fall back to the config value
+            // without the old `!= "high"` hack that broke explicit --fail-on high
+            // (issue #667).
+            let effective_fail_on = if let Some(ref flag) = fail_on {
+                flag.clone()
             } else {
-                cfg.scan.min_severity.clone().unwrap_or(fail_on.clone())
+                cfg.scan.min_severity.clone().unwrap_or_else(|| "high".to_string())
             };
             let fail_threshold = match parse_fail_on(&effective_fail_on) {
                 Ok(sev) => sev,
@@ -506,7 +511,7 @@ fn main() {
                             ) && event
                                 .paths
                                 .iter()
-                                .any(|p| p.extension().map(|e| e == "rs").unwrap_or(false));
+                                .any(|p| p.extension().map(|e| e == "rs").unwrap_or(false) && !is_ignored_path(p));
 
                             if !is_relevant {
                                 continue;

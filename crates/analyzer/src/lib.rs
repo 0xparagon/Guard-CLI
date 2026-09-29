@@ -138,16 +138,6 @@ impl CheckPanicReport {
     }
 }
 
-impl From<&ScanError> for CheckPanicReport {
-    fn from(err: &ScanError) -> Self {
-        match err {
-            ScanError::CheckPanic { .. } => CheckPanicReport {
-                panics: vec![CheckPanic::from(err)],
-            },
-            _ => CheckPanicReport::default(),
-        }
-    }
-}
 
 #[derive(Default)]
 struct Suppressions {

@@ -177,7 +177,7 @@ impl<'ast, 'a> Visit<'ast> for BodyScan<'a> {
             .last()
             .map(|s| s.ident.to_string())
             .unwrap_or_default();
-        if matches!(name.as_str(), "assert" | "require")
+        if matches!(name.as_str(), "assert" | "require" | "assert_eq" | "assert_ne")
             && macro_contains_zero_check(mac, self.addr_params)
         {
             self.has_guard = true;

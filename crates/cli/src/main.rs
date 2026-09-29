@@ -220,7 +220,18 @@ fn run_scan(
             if opts.json {
                 let envelope = serde_json::json!({ "error": e.to_string(), "errors": messages });
                 match serde_json::to_string_pretty(&envelope) {
-                    Ok(payload) => println!("{}", payload),
+                    Ok(payload) => {
+                        // #669: --output must be written even when the scan errors so that
+                        // CI pipelines that unconditionally upload the output artifact get a
+                        // machine-readable error document instead of a missing file.
+                        if let Some(ref out_path) = opts.output {
+                            if let Err(write_err) = write_output(out_path, &payload) {
+                                eprintln!("{} {}", "error:".red().bold(), write_err);
+                            }
+                        } else {
+                            println!("{}", payload);
+                        }
+                    }
                     Err(json_err) => eprintln!("{} {}", "error:".red().bold(), json_err),
                 }
             } else {
@@ -289,6 +300,26 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 
 fn is_leap(year: u64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+/// Emit a setup-time error in the correct format and exit with code 2.
+///
+/// When `use_json` is true (i.e. `--json` was passed) the message is wrapped in
+/// the same `{"error":…,"errors":[…]}` envelope used by scan-time errors so
+/// that automation parsing `--json` output always gets machine-readable JSON,
+/// regardless of whether the failure happened during setup or scanning (#670).
+/// Otherwise the message is printed to stderr as plain text.
+fn emit_setup_error(message: &str, use_json: bool) -> ! {
+    if use_json {
+        let envelope = serde_json::json!({ "error": message, "errors": [message] });
+        match serde_json::to_string_pretty(&envelope) {
+            Ok(payload) => println!("{}", payload),
+            Err(e) => eprintln!("{} {}", "error:".red().bold(), e),
+        }
+    } else {
+        eprintln!("{} {}", "error:".red().bold(), message);
+    }
+    std::process::exit(2)
 }
 
 /// Parse a `--fail-on` / `min_severity` string into a `Severity`.
@@ -377,8 +408,7 @@ fn main() {
             let cfg = match config::load(&scan_path) {
                 Ok(c) => c.unwrap_or_default(),
                 Err(e) => {
-                    eprintln!("{} {}", "error:".red().bold(), e);
-                    std::process::exit(2);
+                    emit_setup_error(&e.to_string(), json);
                 }
             };
 
@@ -391,12 +421,13 @@ fn main() {
             let fail_threshold = match parse_fail_on(&effective_fail_on) {
                 Ok(sev) => sev,
                 Err(bad) => {
-                    eprintln!(
-                        "{} unknown --fail-on value `{}`. Expected one of: high, medium, low",
-                        "error:".red().bold(),
-                        bad
+                    emit_setup_error(
+                        &format!(
+                            "unknown --fail-on value `{}`. Expected one of: high, medium, low",
+                            bad
+                        ),
+                        json,
                     );
-                    std::process::exit(2);
                 }
             };
 
@@ -414,12 +445,13 @@ fn main() {
                 let known_names: HashSet<&str> = known_checks.iter().map(|c| c.name()).collect();
                 for name in &all_disabled {
                     if !known_names.contains(name.as_str()) {
-                        eprintln!(
-                            "{} unknown check `{}`. Run `soroban-guard list-checks` to see available checks.",
-                            "error:".red().bold(),
-                            name
+                        emit_setup_error(
+                            &format!(
+                                "unknown check `{}`. Run `soroban-guard list-checks` to see available checks.",
+                                name
+                            ),
+                            json,
                         );
-                        std::process::exit(2);
                     }
                 }
             }
@@ -444,6 +476,15 @@ fn main() {
                 includes: include.clone(),
                 max_findings,
             };
+
+            // #671: --output without a structured format flag writes nothing and
+            // produces no visible output — warn the user so the mistake is obvious.
+            if output.is_some() && !json && !sarif && !markdown {
+                eprintln!(
+                    "{} --output has no effect without --json, --sarif, or --markdown",
+                    "warning:".yellow().bold()
+                );
+            }
 
             // Run the initial scan.
             let exit_code = run_scan(&opts, &active_checks);
@@ -769,10 +810,10 @@ const CHECK_METADATA: &[CheckMeta] = &[
     },
     CheckMeta {
         name: "unchecked-arithmetic",
-        severity: "medium",
-        short: "Flags unchecked arithmetic on contract state",
+        severity: "high",
+        short: "Flags unchecked arithmetic on contract state (High / Medium / Low per operand)",
         rule: "Wrapping arithmetic operations may overflow",
-        long: Some("Reports wrapping +, -, *, and compound arithmetic in contract methods; prefer checked_* or saturating_* APIs."),
+        long: Some("Reports wrapping +, -, *, and compound arithmetic in contract methods; prefer checked_* or saturating_* APIs. Severity is computed per call site: High for financial-named operands (e.g. amount, balance, price), Low for index-named operands, Medium otherwise."),
     },
     CheckMeta {
         name: "unprotected-admin",
@@ -1671,8 +1712,17 @@ mod tests {
 
         for check in default_checks() {
             let name = check.name();
-            // Inherently multi-severity: `infer_severity` picks High/Medium/Low per call site.
+            // unchecked-arithmetic uses per-call-site severity inference (High/Medium/Low)
+            // so it is intentionally skipped from the docs-header comparison below — the
+            // docs page documents all three levels and there is no single canonical value.
+            // CHECK_METADATA.severity is set to "high" (the worst-case level) so that
+            // list-checks --json and explain report the most safety-conservative answer.
             if name == "unchecked-arithmetic" {
+                let (table_sev, _) = describe_check(name);
+                assert_eq!(
+                    table_sev, "high",
+                    "unchecked-arithmetic CHECK_METADATA.severity should be \"high\" (worst-case)"
+                );
                 continue;
             }
             let Some(doc_sev) = documented.get(name) else {

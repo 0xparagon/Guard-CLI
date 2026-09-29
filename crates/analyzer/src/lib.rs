@@ -261,9 +261,27 @@ fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnS
         })
         .map(|s| s.impl_type.clone())
         .unwrap_or_default();
+
+    // When the finding has an empty function_name (some checks intentionally omit it),
+    // look up the suppression using the actual function name from the span so the
+    // function_checks key matches what parse_suppressions inserted.
+    let lookup_fn_name = if finding.function_name.is_empty() {
+        fn_spans
+            .iter()
+            .find(|s| {
+                s.impl_type == impl_type
+                    && s.start_line <= finding.line
+                    && finding.line <= s.end_line
+            })
+            .map(|s| s.function_name.as_str())
+            .unwrap_or("")
+    } else {
+        finding.function_name.as_str()
+    };
+
     suppressions.function_checks.contains(&(
         impl_type,
-        finding.function_name.clone(),
+        lookup_fn_name.to_string(),
         finding.check_name.clone(),
     ))
 }
@@ -655,21 +673,6 @@ pub fn scan_directory_with_checks(
     Ok((results, files_scanned, files_skipped, check_panics))
 }
 
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
-}
 
 /// Scan an explicit list of `.rs` file paths and aggregate findings from every default check.
 ///

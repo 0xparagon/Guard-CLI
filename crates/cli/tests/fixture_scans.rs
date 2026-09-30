@@ -198,15 +198,13 @@ fn upgrade_safe_produces_no_findings() {
 }
 
 #[test]
-fn admin_event_safe_produces_no_findings() {
-    let (findings, _, _, _) = scan_directory(&fixture_path("admin-event-safe"), &[], &[])
-        .unwrap_or_else(|error| panic!("failed to scan admin-event-safe: {error}"));
-    assert!(
-        findings
-            .iter()
-            .all(|f| f.check_name != "missing-event-for-admin-change"),
-        "admin-event-safe unexpectedly produced missing-event-for-admin-change; findings: {findings:#?}"
-    );
+fn admin_event_fixtures() {
+    assert_fixture_pair("admin-event", "missing-event-for-admin-change");
+}
+
+#[test]
+fn nonce_fixtures() {
+    assert_fixture_pair("nonce", "missing-nonce");
 }
 
 #[test]
@@ -227,6 +225,11 @@ fn ttl_fixtures() {
 #[test]
 fn input_length_fixtures() {
     assert_fixture_pair("input-length", "missing-input-length-bound");
+}
+
+#[test]
+fn large_loop_fixtures() {
+    assert_fixture_pair("large-loop", "large-loop");
 }
 
 /// Regression test for issue #362: a function that writes two distinct persistent keys but

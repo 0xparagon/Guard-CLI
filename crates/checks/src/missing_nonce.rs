@@ -160,6 +160,8 @@ impl C {
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].check_name, "missing-nonce");
+        assert_eq!(findings[0].function_name, "update");
+        assert_eq!(findings[0].line, 4);
         Ok(())
     }
 

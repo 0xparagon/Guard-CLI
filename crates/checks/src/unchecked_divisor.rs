@@ -35,26 +35,24 @@ struct DivisorExprVisitor {
 
 impl<'ast> Visit<'ast> for DivisorExprVisitor {
     fn visit_expr_binary(&mut self, node: &'ast ExprBinary) {
-        if matches!(node.op, BinOp::Div(_) | BinOp::DivAssign(_)) {
-            if !is_literal(&node.right) {
-                let description = "Divisor is not validated to be non-zero; division by zero will panic"
-                    .to_string();
-                self.findings.push(Finding {
-                    check_name: CHECK_NAME.to_string(),
-                    severity: Severity::High,
-                    file_path: String::new(),
-                    line: node.span().start().line,
-                    function_name: self.current_function_name.clone(),
-                    description,
-                    rule_url: Some(
-                        "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-divisor-high"
-                            .to_string(),
-                    ),
-                    suggestion: Some(
-                        "Use checked_div or validate divisor > 0 before division".to_string(),
-                    ),
-                });
-            }
+        if matches!(node.op, BinOp::Div(_) | BinOp::DivAssign(_)) && !is_literal(&node.right) {
+            let description = "Divisor is not validated to be non-zero; division by zero will panic"
+                .to_string();
+            self.findings.push(Finding {
+                check_name: CHECK_NAME.to_string(),
+                severity: Severity::High,
+                file_path: String::new(),
+                line: node.span().start().line,
+                function_name: self.current_function_name.clone(),
+                description,
+                rule_url: Some(
+                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-divisor-high"
+                        .to_string(),
+                ),
+                suggestion: Some(
+                    "Use checked_div or validate divisor > 0 before division".to_string(),
+                ),
+            });
         }
         visit::visit_expr_binary(self, node);
     }

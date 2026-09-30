@@ -1165,16 +1165,11 @@ fn hyperlink(url: &str, text: &str) -> String {
 }
 
 fn style_check_name(check_name: &str, severity: Severity) -> String {
-    if std::env::var_os("NO_COLOR").is_some() {
-        return check_name.to_string();
+    match severity {
+        Severity::High => check_name.red().bold().to_string(),
+        Severity::Medium => check_name.magenta().to_string(),
+        Severity::Low => check_name.dimmed().to_string(),
     }
-
-    let prefix = match severity {
-        Severity::High => "\u{1b}[31m\u{1b}[1m",
-        Severity::Medium => "\u{1b}[35m",
-        Severity::Low => "\u{1b}[2m",
-    };
-    format!("{prefix}{check_name}\u{1b}[0m")
 }
 
 fn print_pretty(

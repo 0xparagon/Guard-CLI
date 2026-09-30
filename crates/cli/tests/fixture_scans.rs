@@ -92,6 +92,38 @@ fn reentrancy_fixtures() {
 }
 
 #[test]
+fn contract_deployment_vulnerable_still_triggers_check() {
+    let (findings, _, _, _) = scan_directory(&fixture_path("contract-deployment-vulnerable"), &[], &[])
+        .unwrap_or_else(|error| panic!("failed to scan contract-deployment-vulnerable: {error}"));
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.check_name == "unprotected-contract-deployment"),
+        "contract-deployment-vulnerable did not produce unprotected-contract-deployment; findings: {findings:#?}"
+    );
+}
+
+#[test]
+fn token_amount_vulnerable_still_triggers_check() {
+    let (findings, _, _, _) = scan_directory(&fixture_path("token-amount-vulnerable"), &[], &[])
+        .unwrap_or_else(|error| panic!("failed to scan token-amount-vulnerable: {error}"));
+    assert!(
+        findings.iter().any(|f| f.check_name == "unchecked-token-amount"),
+        "token-amount-vulnerable did not produce unchecked-token-amount; findings: {findings:#?}"
+    );
+}
+
+#[test]
+fn upgrade_vulnerable_still_triggers_check() {
+    let (findings, _, _, _) = scan_directory(&fixture_path("upgrade-vulnerable"), &[], &[])
+        .unwrap_or_else(|error| panic!("failed to scan upgrade-vulnerable: {error}"));
+    assert!(
+        findings.iter().any(|f| f.check_name == "unprotected-upgrade"),
+        "upgrade-vulnerable did not produce unprotected-upgrade; findings: {findings:#?}"
+    );
+}
+
+#[test]
 fn cli_scan_path_does_not_emit_duplicate_findings() {
     let checks = default_checks_with_config(&[], &[]);
     let (results, _, _, _) = scan_directory_with_checks(
@@ -336,7 +368,7 @@ path = "src"
 
     // Scan using the path from config (via current directory config)
     let config_root = match config::load(&root) {
-        Ok(Some(cfg)) => {
+        Ok((Some(cfg), _)) => {
             if let Some(path_str) = cfg.scan.path {
                 root.join(&path_str)
             } else {

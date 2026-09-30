@@ -339,7 +339,7 @@ fn main() {
             }
             // Try to load soroban-guard.toml from current directory to get default path.
             let config_for_default = match config::load(&PathBuf::from(".")) {
-                Ok(c) => c.unwrap_or_default(),
+                Ok((c, _)) => c.unwrap_or_default(),
                 Err(e) => {
                     eprintln!("{} {}", "error:".red().bold(), e);
                     std::process::exit(2);
@@ -373,9 +373,17 @@ fn main() {
                 }
             };
 
-            // Load soroban-guard.toml from the scan root (if present).
+            // Load soroban-guard.toml, searching upward from the scan path.
             let cfg = match config::load(&scan_path) {
-                Ok(c) => c.unwrap_or_default(),
+                Ok((c, config_path)) => {
+                    if verbose {
+                        match &config_path {
+                            Some(p) => eprintln!("Using config file {}", p.display()),
+                            None => eprintln!("No soroban-guard.toml found"),
+                        }
+                    }
+                    c.unwrap_or_default()
+                }
                 Err(e) => {
                     eprintln!("{} {}", "error:".red().bold(), e);
                     std::process::exit(2);

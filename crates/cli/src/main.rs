@@ -727,7 +727,9 @@ fn build_sarif(findings: &[Finding], files_skipped: usize) -> serde_json::Value 
                 "driver": {
                     "name": "soroban-guard",
                     "informationUri": "https://github.com/SorobanGuard/Guard-CLI",
-                    "rules": rules
+                    "rules": rules,
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "semanticVersion": env!("CARGO_PKG_VERSION")
                 }
             },
             "invocations": [{
@@ -1076,6 +1078,11 @@ fn json_payload(
     let (high, medium, low) = severity_counts(findings);
 
     let envelope = serde_json::json!({
+        "tool": {
+            "name": "soroban-guard",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        "schema_version": 1,
         "summary": {
             "total": findings.len(),
             "high": high,
@@ -1276,6 +1283,14 @@ mod tests {
             "soroban-guard"
         );
         assert_eq!(
+            payload["runs"][0]["tool"]["driver"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(
+            payload["runs"][0]["tool"]["driver"]["semanticVersion"],
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(
             payload["runs"][0]["results"][0]["ruleId"],
             "missing-require-auth"
         );
@@ -1334,6 +1349,26 @@ mod tests {
         assert_eq!(payload["summary"]["low"], 0);
         assert_eq!(payload["summary"]["files_scanned"], 3);
         assert_eq!(payload["summary"]["files_skipped"], 2);
+    }
+
+    #[test]
+    fn json_payload_includes_tool_metadata_and_schema_version() {
+        let findings = vec![Finding {
+            check_name: "missing-require-auth".to_string(),
+            severity: Severity::High,
+            file_path: "src/lib.rs".to_string(),
+            line: 10,
+            function_name: "set_balance".to_string(),
+            description: "Missing auth".to_string(),
+            rule_url: None,
+            suggestion: None,
+        }];
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&json_payload(&findings, 1, 0).unwrap()).unwrap();
+        assert_eq!(payload["tool"]["name"], "soroban-guard");
+        assert_eq!(payload["tool"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(payload["schema_version"], 1);
     }
 
     #[test]

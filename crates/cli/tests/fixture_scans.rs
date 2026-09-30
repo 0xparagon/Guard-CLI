@@ -14,8 +14,13 @@ fn fixture_path(name: &str) -> PathBuf {
 }
 
 fn assert_fixture_pair(base: &str, expected_check: &str) {
-    let (vulnerable, _, _, _) = scan_directory(&fixture_path(&format!("{base}-vulnerable")), &[], &[])
-        .unwrap_or_else(|error| panic!("failed to scan {base}-vulnerable: {error}"));
+    let (vulnerable, _, _, vulnerable_panics) =
+        scan_directory(&fixture_path(&format!("{base}-vulnerable")), &[], &[])
+            .unwrap_or_else(|error| panic!("failed to scan {base}-vulnerable: {error}"));
+    assert!(
+        vulnerable_panics.is_empty(),
+        "no check should panic on {base}-vulnerable; got: {vulnerable_panics:#?}"
+    );
     assert!(
         vulnerable
             .iter()
@@ -23,8 +28,12 @@ fn assert_fixture_pair(base: &str, expected_check: &str) {
         "{base}-vulnerable did not produce {expected_check}; findings: {vulnerable:#?}"
     );
 
-    let (safe, _, _, _) = scan_directory(&fixture_path(&format!("{base}-safe")), &[], &[])
+    let (safe, _, _, safe_panics) = scan_directory(&fixture_path(&format!("{base}-safe")), &[], &[])
         .unwrap_or_else(|error| panic!("failed to scan {base}-safe: {error}"));
+    assert!(
+        safe_panics.is_empty(),
+        "no check should panic on {base}-safe; got: {safe_panics:#?}"
+    );
     assert!(
         safe.iter()
             .all(|finding| finding.check_name != expected_check),
@@ -154,6 +163,50 @@ fn key_collision_fixtures() {
 #[test]
 fn storage_fixtures() {
     assert_fixture_pair("storage", "unsafe-storage-patterns");
+}
+
+#[test]
+fn auth_order_fixtures() {
+    assert_fixture_pair("auth-order", "auth-after-storage-write");
+}
+
+#[test]
+fn token_mint_fixtures() {
+    assert_fixture_pair("token-mint", "unprotected-token-mint");
+}
+
+#[test]
+fn contract_deployment_safe_produces_no_findings() {
+    let (findings, _, _, _) = scan_directory(&fixture_path("contract-deployment-safe"), &[], &[])
+        .unwrap_or_else(|error| panic!("failed to scan contract-deployment-safe: {error}"));
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.check_name != "unprotected-contract-deployment"),
+        "contract-deployment-safe unexpectedly produced unprotected-contract-deployment; findings: {findings:#?}"
+    );
+}
+
+#[test]
+fn upgrade_safe_produces_no_findings() {
+    let (findings, _, _, _) = scan_directory(&fixture_path("upgrade-safe"), &[], &[])
+        .unwrap_or_else(|error| panic!("failed to scan upgrade-safe: {error}"));
+    assert!(
+        findings.iter().all(|f| f.check_name != "unprotected-upgrade"),
+        "upgrade-safe unexpectedly produced unprotected-upgrade; findings: {findings:#?}"
+    );
+}
+
+#[test]
+fn admin_event_safe_produces_no_findings() {
+    let (findings, _, _, _) = scan_directory(&fixture_path("admin-event-safe"), &[], &[])
+        .unwrap_or_else(|error| panic!("failed to scan admin-event-safe: {error}"));
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.check_name != "missing-event-for-admin-change"),
+        "admin-event-safe unexpectedly produced missing-event-for-admin-change; findings: {findings:#?}"
+    );
 }
 
 #[test]

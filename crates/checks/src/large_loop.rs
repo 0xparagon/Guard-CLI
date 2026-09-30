@@ -88,6 +88,8 @@ impl C {
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].check_name, "large-loop");
+        assert_eq!(findings[0].function_name, "process");
+        assert_eq!(findings[0].line, 5);
         Ok(())
     }
 
@@ -107,6 +109,8 @@ impl C {
         let check = LargeLoopCheck;
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].function_name, "process");
+        assert_eq!(findings[0].line, 5);
         Ok(())
     }
 

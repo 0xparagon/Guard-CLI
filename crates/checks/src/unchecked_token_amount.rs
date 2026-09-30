@@ -31,7 +31,7 @@ struct TokenAmountVisitor {
 impl<'ast> Visit<'ast> for TokenAmountVisitor {
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
         let prev = std::mem::replace(&mut self.current_function, node.sig.ident.to_string());
-        let prev_block = std::mem::replace(&mut self.current_block, Some(Box::new(node.block.clone())));
+        let prev_block = self.current_block.replace(Box::new(node.block.clone()));
         visit::visit_impl_item_fn(self, node);
         self.current_block = prev_block;
         self.current_function = prev;
@@ -81,13 +81,13 @@ impl<'ast> Visit<'ast> for AmountGuardVisitor {
     fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
         if let syn::Expr::Path(left) = &*node.left {
             if let Some(ident) = left.path.get_ident() {
-                if ident == "amount" {
-                    if matches!(
+                if ident == "amount"
+                    && matches!(
                         node.op,
                         syn::BinOp::Gt(_) | syn::BinOp::Ge(_) | syn::BinOp::Lt(_) | syn::BinOp::Le(_)
-                    ) {
-                        self.found_guard = true;
-                    }
+                    )
+                {
+                    self.found_guard = true;
                 }
             }
         }

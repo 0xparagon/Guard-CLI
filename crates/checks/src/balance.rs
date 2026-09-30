@@ -1,10 +1,16 @@
 //! Flags token `transfer`/`transfer_from` calls in `#[contractimpl]` methods that lack
 //! a preceding `balance()` or `authorized()` check.
+//!
+//! Calls are qualified by receiver: only `transfer` / `balance` / `authorized` invoked on
+//! a local binding initialised from `token::Client::new(...)` (or `TokenClient::new(...)`)
+//! count. A same-named method on an unrelated type (`self.ownership.transfer(...)`,
+//! `self.ledger.balance()`) is ignored, in either direction.
 
 use crate::util::contractimpl_functions_excluding_test;
 use crate::{Check, Finding, Severity};
+use std::collections::HashSet;
 use syn::visit::{self, Visit};
-use syn::{ExprMethodCall, File};
+use syn::{Expr, ExprMethodCall, File, Item, Pat, Stmt};
 
 const CHECK_NAME: &str = "missing-balance-check";
 
@@ -17,28 +23,37 @@ impl Check for MissingBalanceCheck {
 
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
+        let token_client_aliases = collect_token_client_aliases(file);
         for method in contractimpl_functions_excluding_test(file) {
             let fn_name = method.sig.ident.to_string();
-            let mut scan = BodyScan::default();
+            let mut scan = BodyScan {
+                token_client_aliases: token_client_aliases.clone(),
+                ..Default::default()
+            };
             scan.visit_block(&method.block);
 
-            // Evaluate each transfer call site independently: a finding is emitted
-            // for every transfer that has no balance()/authorized() call between the
-            // previous transfer (exclusive) and this one (exclusive).  A single check
-            // at the function top does not "cover" every subsequent transfer because
-            // each transfer changes the balance.
-            let mut prev_transfer_line: usize = 0; // sentinel: start of function
-            for transfer_line in &scan.transfer_lines {
-                let guarded = scan
-                    .balance_lines
+            let mut transfers = scan.transfers;
+            transfers.sort_unstable();
+            let mut balances = scan.balances;
+            balances.sort_unstable();
+
+            // Evaluate each transfer call site independently: a finding is emitted for
+            // every transfer that has no balance()/authorized() call between the previous
+            // transfer (exclusive) and this one (exclusive). A single check at the function
+            // top does not "cover" every subsequent transfer because each transfer changes
+            // the balance. Positions are `(line, column)` so a balance and a transfer on the
+            // same source line are still ordered correctly.
+            let mut prev_transfer: (usize, usize) = (0, 0);
+            for &transfer_pos in &transfers {
+                let guarded = balances
                     .iter()
-                    .any(|bl| *bl > prev_transfer_line && bl < transfer_line);
+                    .any(|&bal| bal > prev_transfer && bal < transfer_pos);
                 if !guarded {
                     out.push(Finding {
                         check_name: CHECK_NAME.to_string(),
                         severity: Severity::High,
                         file_path: String::new(),
-                        line: *transfer_line,
+                        line: transfer_pos.0,
                         function_name: fn_name.clone(),
                         description: format!(
                             "Function `{fn_name}` calls `transfer` or `transfer_from` without a \
@@ -56,37 +71,134 @@ impl Check for MissingBalanceCheck {
                         ),
                     });
                 }
-                prev_transfer_line = *transfer_line;
+                prev_transfer = transfer_pos;
             }
         }
         out
     }
 }
 
-/// Accumulates the source lines of every `transfer`/`transfer_from` call and
-/// every `balance`/`authorized` call seen in a function body.  Per-call-site
-/// evaluation is done in the caller after the visitor has finished the walk.
+/// Accumulates the `(line, column)` position of every token-client `transfer`/`transfer_from`
+/// call and every token-client `balance`/`authorized` call in a function body. Per-call-site
+/// evaluation is done in the caller after the walk finishes.
 #[derive(Default)]
 struct BodyScan {
-    /// Source line of each `transfer` or `transfer_from` call (in visit order).
-    transfer_lines: Vec<usize>,
-    /// Source line of each `balance` or `authorized` call (in visit order).
-    balance_lines: Vec<usize>,
+    /// Local bindings initialised from `token::Client::new(...)` / `TokenClient::new(...)`
+    /// (or an aliased client type, e.g. `use ...::Client as Tok; Tok::new(...)`).
+    token_bindings: HashSet<String>,
+    /// Alias idents (`Tok`) that map to `Client` / `TokenClient` via `use ... as`.
+    token_client_aliases: HashSet<String>,
+    transfers: Vec<(usize, usize)>,
+    balances: Vec<(usize, usize)>,
 }
 
 impl<'ast> Visit<'ast> for BodyScan {
+    fn visit_stmt(&mut self, stmt: &'ast Stmt) {
+        // Collect token-client bindings in source order so later calls resolve against
+        // them. Re-binding the same name to something else clears the entry.
+        if let Stmt::Local(local) = stmt {
+            if let (Some(name), Some(init)) = (binding_ident(&local.pat), &local.init) {
+                if expr_is_token_client_ctor(&init.expr, &self.token_client_aliases) {
+                    self.token_bindings.insert(name);
+                } else {
+                    self.token_bindings.remove(&name);
+                }
+            }
+        }
+        visit::visit_stmt(self, stmt);
+    }
+
     fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
         let method = i.method.to_string();
-        match method.as_str() {
-            "transfer" | "transfer_from" => {
-                self.transfer_lines.push(i.method.span().start().line);
+        let on_token_client = ident_of(&i.receiver)
+            .map(|r| self.token_bindings.contains(&r))
+            .unwrap_or(false);
+        if on_token_client {
+            let start = i.method.span().start();
+            let pos = (start.line, start.column);
+            match method.as_str() {
+                "transfer" | "transfer_from" => self.transfers.push(pos),
+                "balance" | "authorized" => self.balances.push(pos),
+                _ => {}
             }
-            "balance" | "authorized" => {
-                self.balance_lines.push(i.method.span().start().line);
-            }
-            _ => {}
         }
         visit::visit_expr_method_call(self, i);
+    }
+}
+
+/// Name bound by a `let` pattern, digging through an explicit type annotation.
+fn binding_ident(pat: &Pat) -> Option<String> {
+    match pat {
+        Pat::Ident(pi) => Some(pi.ident.to_string()),
+        Pat::Type(pt) => binding_ident(&pt.pat),
+        _ => None,
+    }
+}
+
+/// Identifier behind a plain path (`x`) or a reference to one (`&x`, `&mut x`).
+fn ident_of(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Reference(r) => ident_of(&r.expr),
+        Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+        _ => None,
+    }
+}
+
+/// Collect every `use ...::Client as X` / `use ...::TokenClient as X` alias so a renamed
+/// token-client type (`Tok::new(...)`) is still recognised as a token-client constructor.
+fn collect_token_client_aliases(file: &File) -> HashSet<String> {
+    let mut aliases = HashSet::new();
+    for item in &file.items {
+        if let Item::Use(use_item) = item {
+            collect_aliases_from_use_tree(&use_item.tree, &mut aliases);
+        }
+    }
+    aliases
+}
+
+/// `syn::UseTree` is an enum (`Path`/`Name`/`Rename`/`Glob`/`Group`), not a
+/// struct with `rename`/`prefix`/`group` fields — those don't exist. A
+/// renamed import (`use a::b::TokenClient as Tc;`) parses as nested `Path`
+/// nodes (`a`, then `b`) wrapping a terminal `Rename` node holding the
+/// original name (`ident`, here `TokenClient`) and the new one (`rename`,
+/// `Tc`); a group (`use a::{X, Y as Z};`) parses as a `Group` of `UseTree`s,
+/// each needing the same walk.
+fn collect_aliases_from_use_tree(tree: &syn::UseTree, out: &mut HashSet<String>) {
+    match tree {
+        syn::UseTree::Rename(rename) => {
+            if rename.ident == "Client" || rename.ident == "TokenClient" {
+                out.insert(rename.rename.to_string());
+            }
+        }
+        syn::UseTree::Path(path) => collect_aliases_from_use_tree(&path.tree, out),
+        syn::UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_aliases_from_use_tree(nested, out);
+            }
+        }
+        syn::UseTree::Name(_) | syn::UseTree::Glob(_) => {}
+    }
+}
+
+/// Is `expr` a call to `token::Client::new(...)`, `TokenClient::new(...)`, an aliased client
+/// type (`Tok::new(...)` where `Tok` aliases `Client`/`TokenClient`), or any path ending in
+/// `Client::new` / `TokenClient::new`? Also looks through a leading `&`.
+fn expr_is_token_client_ctor(expr: &Expr, aliases: &HashSet<String>) -> bool {
+    match expr {
+        Expr::Reference(r) => expr_is_token_client_ctor(&r.expr, aliases),
+        Expr::Call(call) => {
+            let Expr::Path(p) = &*call.func else {
+                return false;
+            };
+            let segs = &p.path.segments;
+            let n = segs.len();
+            if n < 2 || segs[n - 1].ident != "new" {
+                return false;
+            }
+            let ty = &segs[n - 2].ident;
+            ty == "Client" || ty == "TokenClient" || aliases.contains(&ty.to_string())
+        }
+        _ => false,
     }
 }
 
@@ -109,8 +221,9 @@ mod tests {
 #[contractimpl]
 impl Token {
     pub fn send(env: Env) {
+        let token = token::Client::new(&env, &id);
         let bal = token.balance(&sender);
-        token.transfer(&env, &sender, &recv, &amount);
+        token.transfer(&sender, &recv, &amount);
     }
 }
 "#;
@@ -123,7 +236,8 @@ impl Token {
 #[contractimpl]
 impl Token {
     pub fn send(env: Env) {
-        token.transfer(&env, &sender, &recv, &amount);
+        let token = token::Client::new(&env, &id);
+        token.transfer(&sender, &recv, &amount);
     }
 }
 "#;
@@ -138,12 +252,14 @@ impl Token {
 #[contractimpl]
 impl Token {
     pub fn double_send(env: Env) {
+        let token = token::Client::new(&env, &id);
+
         // First transfer: guarded — should NOT produce a finding.
         let bal = token.balance(&sender);
-        token.transfer(&env, &sender, &recv, &amount);
+        token.transfer(&sender, &recv, &amount);
 
         // Second transfer: no balance check before it — MUST produce a finding.
-        token.transfer(&env, &sender, &recv2, &amount2);
+        token.transfer(&sender, &recv2, &amount2);
     }
 }
 "#;
@@ -158,12 +274,104 @@ impl Token {
 #[contractimpl]
 impl Token {
     pub fn double_send(env: Env) {
-        token.transfer(&env, &sender, &recv, &amount);
-        token.transfer(&env, &sender, &recv2, &amount2);
+        let token = token::Client::new(&env, &id);
+        token.transfer(&sender, &recv, &amount);
+        token.transfer(&sender, &recv2, &amount2);
     }
 }
 "#;
         let lines = finding_lines(src);
         assert_eq!(lines.len(), 2, "both unguarded transfers should be flagged; got lines: {lines:?}");
+    }
+
+    /// #403 false positive: a non-token `transfer` method on an unrelated type.
+    #[test]
+    fn ignores_transfer_on_non_token_receiver() {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn transfer_ownership(env: Env, new_owner: Address) {
+        self.ownership.transfer(&new_owner);
+    }
+}
+"#;
+        assert!(finding_lines(src).is_empty());
+    }
+
+    /// #403 false negative: an unrelated `.balance()` must not silence a real finding.
+    #[test]
+    fn unrelated_balance_does_not_suppress_finding() {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn payout(env: Env, to: Address, amount: i128) {
+        let token = token::Client::new(&env, &id);
+        let _ = self.ledger.balance();
+        token.transfer(&from, &to, &amount);
+    }
+}
+"#;
+        assert_eq!(finding_lines(src).len(), 1);
+    }
+
+    /// #403 precision: a balance check and the transfer on the same source line.
+    #[test]
+    fn same_line_balance_check_counts_as_preceding() {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn send(env: Env) {
+        let token = token::Client::new(&env, &id);
+        if token.balance(&sender) >= amount { token.transfer(&sender, &recv, &amount); }
+    }
+}
+"#;
+        assert!(finding_lines(src).is_empty());
+    }
+
+    #[test]
+    fn recognizes_aliased_token_client_import() {
+        // #515: `use soroban_sdk::token::Client as Tok; Tok::new(...)` must be
+        // recognised as a token-client constructor so transfers are balance-checked.
+        let src = r#"
+use soroban_sdk::token::Client as Tok;
+
+#[contractimpl]
+impl C {
+    pub fn send(env: Env) {
+        let token = Tok::new(&env, &id);
+        token.transfer(&sender, &recv, &amount);
+    }
+}
+"#;
+        assert_eq!(finding_lines(src).len(), 1);
+    }
+
+    #[test]
+    fn collects_a_direct_alias() -> Result<(), syn::Error> {
+        let file = syn::parse_file("use soroban_sdk::token::TokenClient as Tc;")?;
+        let aliases = collect_token_client_aliases(&file);
+        assert_eq!(aliases, HashSet::from(["Tc".to_string()]));
+        Ok(())
+    }
+
+    #[test]
+    fn collects_a_grouped_alias() -> Result<(), syn::Error> {
+        let file = syn::parse_file(
+            "use soroban_sdk::token::{Client as C, StellarAssetClient};",
+        )?;
+        let aliases = collect_token_client_aliases(&file);
+        // `Client as C` is aliased and collected; `StellarAssetClient` has no
+        // rename at all, so it contributes nothing (it's a `Name`, not a
+        // `Rename`) — the group must not be mistaken for one big rename.
+        assert_eq!(aliases, HashSet::from(["C".to_string()]));
+        Ok(())
+    }
+
+    #[test]
+    fn a_non_client_rename_is_not_collected() -> Result<(), syn::Error> {
+        let file = syn::parse_file("use soroban_sdk::Address as Addr;")?;
+        assert!(collect_token_client_aliases(&file).is_empty());
+        Ok(())
     }
 }

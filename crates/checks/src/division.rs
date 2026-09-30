@@ -44,7 +44,7 @@ impl Visit<'_> for DivVisitor<'_> {
     fn visit_expr_binary(&mut self, i: &ExprBinary) {
         let flagged = match &i.op {
             BinOp::Div(_) => !(is_literal(&i.left) && is_literal(&i.right)),
-            BinOp::DivAssign(_) => true,
+            BinOp::DivAssign(_) => !is_literal(&i.right),
             _ => false,
         };
         if flagged {
@@ -68,7 +68,11 @@ impl Visit<'_> for DivVisitor<'_> {
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#integer-division-truncation-medium"
                         .to_string(),
                 ),
-                suggestion: None,
+                suggestion: Some(
+                    "Use `checked_div` and handle the `None` case, or document the rounding \
+                     direction explicitly (e.g. floor vs. ceiling) with a comment."
+                        .to_string(),
+                ),
             });
         }
         visit::visit_expr_binary(self, i);
@@ -102,6 +106,32 @@ impl C {
 
     #[test]
     fn flags_div_assign() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(_env: Env, mut x: i128, y: i128) { x /= y; }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn ignores_div_assign_of_literal() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(_env: Env, mut x: i128) { x /= 2; }
+}
+"#);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn flags_div_assign_of_non_literal() {
         let hits = run(r#"
 use soroban_sdk::{contractimpl, Env};
 pub struct C;

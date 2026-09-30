@@ -12,7 +12,7 @@ This document describes what each Soroban Guard Core check looks for and why it 
 
 In an `impl` block marked with `#[contractimpl]` or `#[soroban_sdk::contractimpl]`, any function whose body:
 
-1. Performs a storage mutation through `env.storage()` (heuristic: method s `set`, `remove`, `extend_ttl`, `bump`, or `append` on a receiver chain that includes `.storage()`), and  
+1. Performs a storage mutation through `env.storage()` (heuristic: method `set`, `remove`, or `append` on a receiver chain that includes `.storage()`), and  
 2. Never calls `env.require_auth()` (parameter name **`env`**: `env.require_auth()`).
 
 **Why it matters**
@@ -23,6 +23,7 @@ Contract state updates should be gated. This rule recognizes both `env.require_a
 
 - Only the `Env` binding named `env` counts.
 - Static analysis cannot see auth hidden in helpers.
+- `extend_ttl`/`bump` are not treated as storage mutations: extending a ledger entry's TTL does not change the stored value, cannot move funds, and cannot escalate privilege, so it is not a write this check cares about.
 
 **Fixture:** `test-contracts/vulnerable/`, `test-contracts/safe/`
 
@@ -34,11 +35,15 @@ Contract state updates should be gated. This rule recognizes both `env.require_a
 
 **What it detects**
 
-In a `#[contractimpl]` method, a storage mutation through `env.storage()` (`set`, `remove`, `extend_ttl`, `bump`, or `append`) occurs before any call to `env.require_auth()` or `env.require_auth_for_args()` on the same `Env` binding.
+In a `#[contractimpl]` method, a storage mutation through `env.storage()` (`set`, `remove`, or `append`) occurs before any call to `env.require_auth()` or `env.require_auth_for_args()` on the same `Env` binding.
 
 **Why it matters**
 
 Authorization should happen before state mutation. If a contract writes to storage before requiring auth, an attacker may influence state changes without being authorized.
+
+**Limitations**
+
+- `extend_ttl`/`bump` are not treated as storage mutations for this check: extending a ledger entry's TTL is a deliberately permissionless operation in Soroban (anyone paying the rent may keep an entry alive) and does not change the stored value, so ordering it before `require_auth()` is not a finding.
 
 **Example**
 
@@ -111,10 +116,15 @@ Public (`pub fn`) methods in `#[contractimpl]` whose name **exactly matches** a 
 
 Names like `set_owner` strongly suggest privilege; without any auth call the scanner treats the entrypoint as world-callable.
 
+**Relationship to `unprotected-upgrade`**
+
+`SENSITIVE_NAMES` in `crates/checks/src/admin.rs` includes `migrate` and `upgrade`, which the dedicated [`unprotected-upgrade`](#unprotected-upgrade-high) check also covers. The overlap is **intentional**: `unprotected-admin` is the broad "privileged entrypoint" net keyed on an exact name match, while `unprotected-upgrade` is narrower and adds upgrade-specific reasoning — it matches on substring (e.g. `set_wasm_hash`, `replace_wasm_v2`) and verifies that the auth call precedes the WASM swap. An unprotected `pub fn upgrade(...)` or `pub fn migrate(...)` is therefore reported by both checks: same root cause, two angles. Adding a `require_auth` / `require_auth_for_args` call clears both findings at once.
+
 **Limitations**
 
 - Name allowlist only; extend the list as your org sees fit.
 - Any `require_auth` / `require_auth_for_args` anywhere in the body clears the finding (no dataflow).
+- `migrate` / `upgrade` findings are also reported by [`unprotected-upgrade`](#unprotected-upgrade-high) (see above).
 
 **Fixture:** `test-contracts/admin-vulnerable/`, `test-contracts/admin-safe/`
 
@@ -283,8 +293,14 @@ Integer division truncates the fractional part, which can lead to precision loss
 
 - Syntactic only — any non-literal divisor triggers the finding regardless of actual values.
 - Does not detect `checked_div` misuse or rounding strategies.
+- **Overlap with `unchecked-divisor`:** when a division's divisor is both non-literal
+  and unvalidated, `unchecked-divisor` (High) also fires on the same file/line/function.
+  The analyzer's `suppress_redundant_division_finding` drops the `integer-division-truncation`
+  finding in that case, since the High finding already covers the same expression.
+  Validating the divisor first (so `unchecked-divisor` does not fire) lets
+  `integer-division-truncation` surface on its own.
 
-**Fixture:** tests in `crates/checks/src/division.rs`
+**Fixture:** `test-contracts/division-vulnerable/`, `test-contracts/division-safe/`; tests in `crates/checks/src/division.rs`
 
 ---
 
@@ -357,16 +373,19 @@ Self-transfers waste ledger space, waste the caller's gas, and may indicate a lo
 
 **What it detects**
 
-In `#[contractimpl]` methods whose name matches a sensitive set (e.g. `set_owner`, `set_admin`, `initialize`, `init`): function parameters of type `Address` that are not guarded by a zero-address check (`require_auth`, `assert`, or comparison against a default/zero address) before being used.
+In `#[contractimpl]` methods whose name matches a sensitive set (e.g. `set_owner`, `set_admin`, `initialize`, `init`): function parameters of type `Address` that are not guarded by an invalid-destination check before being used.
 
 **Why it matters**
 
-Setting an admin or owner to `Address::default()` (the zero address) can permanently lock privileged functions. The check ensures that sensitive address parameters are validated before use.
+`soroban_sdk::Address` has no zero/default value — unlike EVM's `address(0)`, there is no all-zero `Address` to compare against, and `Address::default()`, `.is_zero()` and `.is_default()` do not exist on the type (verified against `soroban-sdk = "22.0.0"`). The closest real invalid-destination check on Stellar is comparing the parameter against the contract's own address via `env.current_contract_address()`: accidentally setting the admin/owner to the contract's own address can permanently lock privileged functions, since the contract cannot call `require_auth()` on its own behalf. The check accepts a `!=`/`==` comparison (directly, or inside `assert!`/`require!`) between the sensitive `Address` parameter and `env.current_contract_address()`.
+
+An authorization check such as `require_auth()` proves the *caller* is authorised; it does not validate the *value* of the address argument, so it is not accepted as a guard on its own.
 
 **Limitations**
 
-- Guard detection is heuristic — only standard patterns are recognized.
+- Guard detection is heuristic — only standard patterns are recognized (a direct comparison against `env.current_contract_address()`).
 - External validation in helper functions is not tracked.
+- `Address::default()`, `.is_zero()` and `.is_default()` are intentionally **not** accepted, since they do not compile against `soroban-sdk`.
 
 **Fixture:** tests in `crates/checks/src/zero_address.rs`
 
@@ -644,6 +663,28 @@ Public methods in `#[contractimpl]` that:
 
 Off-chain-signed meta-transactions (e.g. permit-style flows, delegated actions) must include a nonce or sequence number to prevent replay attacks. Without one, an observer can re-submit a valid signed payload to repeat the state-mutating operation indefinitely on behalf of the signer.
 
+**Example**
+
+```rust
+#[contractimpl]
+impl Contract {
+	pub fn set_balance(env: Env, user: Address, amount: i128) {
+		// Finding: Address parameter + storage write, no nonce reference.
+		user.require_auth();
+		env.storage().persistent().set(&user, &amount);
+	}
+
+	pub fn set_balance_protected(env: Env, user: Address, amount: i128, nonce: u64) {
+		user.require_auth();
+		let key = (symbol_short!("nonce"), user.clone());
+		let expected: u64 = env.storage().persistent().get(&key).unwrap_or(0);
+		assert_eq!(nonce, expected, "bad nonce");
+		env.storage().persistent().set(&key, &(nonce + 1));
+		env.storage().persistent().set(&user, &amount);
+	}
+}
+```
+
 **Limitations**
 
 - Detection is purely identifier-based; a nonce stored under a differently-named variable (e.g. `counter`, `ts`) will not clear the finding.
@@ -689,7 +730,7 @@ Upgrade and migration entrypoints replace the contract's executable code. Withou
 
 **Relationship to `unprotected-admin`**
 
-[`unprotected-admin`](#unprotected-admin-high) also flags `upgrade` and `migrate` by exact name match against its `SENSITIVE_NAMES` list. This check is broader: it matches on substring (e.g. `set_wasm_hash`, `replace_wasm_v2`) rather than requiring an exact name, so the two checks can both report the same function.
+[`unprotected-admin`](#unprotected-admin-high) also flags `upgrade` and `migrate` by exact name match against its `SENSITIVE_NAMES` list. This check is broader: it matches on substring (e.g. `set_wasm_hash`, `replace_wasm_v2`) rather than requiring an exact name, and it additionally checks that the auth call comes *before* the WASM swap. The double report on a plain `upgrade` / `migrate` entrypoint is **intentional** — two useful angles on the same bug — and a single fix (adding `require_auth`) clears both findings.
 
 **Limitations**
 

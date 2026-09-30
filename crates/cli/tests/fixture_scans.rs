@@ -1,16 +1,26 @@
-use soroban_guard_analyzer::scan_directory;
+use soroban_guard_analyzer::{scan_directory, scan_directory_with_checks};
+use soroban_guard_checks::default_checks_with_config;
 use std::path::PathBuf;
+
+#[path = "../src/config.rs"]
+mod config;
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
+        .join("..")
+        .join("..")
         .join("test-contracts")
         .join(name)
 }
 
 fn assert_fixture_pair(base: &str, expected_check: &str) {
-    let (vulnerable, _, _) = scan_directory(&fixture_path(&format!("{base}-vulnerable")), &[], &[])
-        .unwrap_or_else(|error| panic!("failed to scan {base}-vulnerable: {error}"));
+    let (vulnerable, _, _, vulnerable_panics) =
+        scan_directory(&fixture_path(&format!("{base}-vulnerable")), &[], &[])
+            .unwrap_or_else(|error| panic!("failed to scan {base}-vulnerable: {error}"));
+    assert!(
+        vulnerable_panics.is_empty(),
+        "no check should panic on {base}-vulnerable; got: {vulnerable_panics:#?}"
+    );
     assert!(
         vulnerable
             .iter()
@@ -18,8 +28,12 @@ fn assert_fixture_pair(base: &str, expected_check: &str) {
         "{base}-vulnerable did not produce {expected_check}; findings: {vulnerable:#?}"
     );
 
-    let (safe, _, _) = scan_directory(&fixture_path(&format!("{base}-safe")), &[], &[])
+    let (safe, _, _, safe_panics) = scan_directory(&fixture_path(&format!("{base}-safe")), &[], &[])
         .unwrap_or_else(|error| panic!("failed to scan {base}-safe: {error}"));
+    assert!(
+        safe_panics.is_empty(),
+        "no check should panic on {base}-safe; got: {safe_panics:#?}"
+    );
     assert!(
         safe.iter()
             .all(|finding| finding.check_name != expected_check),
@@ -29,7 +43,7 @@ fn assert_fixture_pair(base: &str, expected_check: &str) {
 
 #[test]
 fn missing_require_auth_fixtures() {
-    let (vulnerable, _, _) = scan_directory(&fixture_path("vulnerable"), &[], &[])
+    let (vulnerable, _, _, _) = scan_directory(&fixture_path("vulnerable"), &[], &[])
         .unwrap_or_else(|error| panic!("failed to scan vulnerable: {error}"));
     assert!(
         vulnerable
@@ -38,7 +52,7 @@ fn missing_require_auth_fixtures() {
         "vulnerable did not produce missing-require-auth; findings: {vulnerable:#?}"
     );
 
-    let (safe, _, _) = scan_directory(&fixture_path("safe"), &[], &[])
+    let (safe, _, _, _) = scan_directory(&fixture_path("safe"), &[], &[])
         .unwrap_or_else(|error| panic!("failed to scan safe: {error}"));
     assert!(
         safe.iter()
@@ -78,6 +92,60 @@ fn reentrancy_fixtures() {
 }
 
 #[test]
+fn contract_deployment_vulnerable_still_triggers_check() {
+    let (findings, _, _, _) = scan_directory(&fixture_path("contract-deployment-vulnerable"), &[], &[])
+        .unwrap_or_else(|error| panic!("failed to scan contract-deployment-vulnerable: {error}"));
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.check_name == "unprotected-contract-deployment"),
+        "contract-deployment-vulnerable did not produce unprotected-contract-deployment; findings: {findings:#?}"
+    );
+}
+
+#[test]
+fn token_amount_vulnerable_still_triggers_check() {
+    let (findings, _, _, _) = scan_directory(&fixture_path("token-amount-vulnerable"), &[], &[])
+        .unwrap_or_else(|error| panic!("failed to scan token-amount-vulnerable: {error}"));
+    assert!(
+        findings.iter().any(|f| f.check_name == "unchecked-token-amount"),
+        "token-amount-vulnerable did not produce unchecked-token-amount; findings: {findings:#?}"
+    );
+}
+
+#[test]
+fn upgrade_vulnerable_still_triggers_check() {
+    let (findings, _, _, _) = scan_directory(&fixture_path("upgrade-vulnerable"), &[], &[])
+        .unwrap_or_else(|error| panic!("failed to scan upgrade-vulnerable: {error}"));
+    assert!(
+        findings.iter().any(|f| f.check_name == "unprotected-upgrade"),
+        "upgrade-vulnerable did not produce unprotected-upgrade; findings: {findings:#?}"
+    );
+}
+
+#[test]
+fn cli_scan_path_does_not_emit_duplicate_findings() {
+    let checks = default_checks_with_config(&[], &[]);
+    let (results, _, _, _) = scan_directory_with_checks(
+        &fixture_path("reentrancy-vulnerable"),
+        &[],
+        &[],
+        &checks,
+    )
+    .expect("failed to scan reentrancy-vulnerable");
+
+    let findings: Vec<_> = results.into_iter().flat_map(|result| result.findings).collect();
+    let mut keys = std::collections::HashSet::new();
+    for finding in findings {
+        let key = (finding.file_path.clone(), finding.line, finding.check_name.clone());
+        assert!(
+            keys.insert(key),
+            "CLI scan emitted duplicate finding: {finding:?}"
+        );
+    }
+}
+
+#[test]
 fn self_transfer_fixtures() {
     assert_fixture_pair("self-transfer", "self-transfer");
 }
@@ -98,6 +166,48 @@ fn storage_fixtures() {
 }
 
 #[test]
+fn auth_order_fixtures() {
+    assert_fixture_pair("auth-order", "auth-after-storage-write");
+}
+
+#[test]
+fn token_mint_fixtures() {
+    assert_fixture_pair("token-mint", "unprotected-token-mint");
+}
+
+#[test]
+fn contract_deployment_safe_produces_no_findings() {
+    let (findings, _, _, _) = scan_directory(&fixture_path("contract-deployment-safe"), &[], &[])
+        .unwrap_or_else(|error| panic!("failed to scan contract-deployment-safe: {error}"));
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.check_name != "unprotected-contract-deployment"),
+        "contract-deployment-safe unexpectedly produced unprotected-contract-deployment; findings: {findings:#?}"
+    );
+}
+
+#[test]
+fn upgrade_safe_produces_no_findings() {
+    let (findings, _, _, _) = scan_directory(&fixture_path("upgrade-safe"), &[], &[])
+        .unwrap_or_else(|error| panic!("failed to scan upgrade-safe: {error}"));
+    assert!(
+        findings.iter().all(|f| f.check_name != "unprotected-upgrade"),
+        "upgrade-safe unexpectedly produced unprotected-upgrade; findings: {findings:#?}"
+    );
+}
+
+#[test]
+fn admin_event_fixtures() {
+    assert_fixture_pair("admin-event", "missing-event-for-admin-change");
+}
+
+#[test]
+fn nonce_fixtures() {
+    assert_fixture_pair("nonce", "missing-nonce");
+}
+
+#[test]
 fn zero_address_fixtures() {
     assert_fixture_pair("zero-address", "missing-zero-address-check");
 }
@@ -112,13 +222,23 @@ fn ttl_fixtures() {
     assert_fixture_pair("ttl", "missing-ttl-extension");
 }
 
+#[test]
+fn input_length_fixtures() {
+    assert_fixture_pair("input-length", "missing-input-length-bound");
+}
+
+#[test]
+fn large_loop_fixtures() {
+    assert_fixture_pair("large-loop", "large-loop");
+}
+
 /// Regression test for issue #362: a function that writes two distinct persistent keys but
 /// only calls extend_ttl on one of them must still produce a finding for the unextended key.
 /// The old function-scoped `has_extend` flag would have suppressed both findings.
 #[test]
 fn ttl_mixed_key_scenario_produces_finding() {
     let path = fixture_path("ttl-vulnerable");
-    let (findings, _, _) = scan_directory(&path, &[], &[])
+    let (findings, _, _, _) = scan_directory(&path, &[], &[])
         .expect("failed to scan ttl-vulnerable");
 
     // The `update` function writes KEY and KEY2 but only extends TTL for KEY2.
@@ -180,7 +300,7 @@ extra = ["drain"]
 
     // Without config: `drain` should NOT be flagged.
     let checks_no_cfg = default_checks_with_config(&[], &[]);
-    let (results_no_cfg, _, _) =
+    let (results_no_cfg, _, _, _) =
         scan_directory_with_checks(&root, &[], &[], &checks_no_cfg).unwrap();
     let findings_no_cfg: Vec<_> = results_no_cfg
         .iter()
@@ -194,7 +314,7 @@ extra = ["drain"]
 
     // With config extra name: `drain` SHOULD be flagged.
     let checks_with_cfg = default_checks_with_config(&[], &["drain".to_string()]);
-    let (results_with_cfg, _, _) =
+    let (results_with_cfg, _, _, _) =
         scan_directory_with_checks(&root, &[], &[], &checks_with_cfg).unwrap();
     let findings_with_cfg: Vec<_> = results_with_cfg
         .iter()
@@ -251,7 +371,7 @@ path = "src"
 
     // Scan using the path from config (via current directory config)
     let config_root = match config::load(&root) {
-        Ok(Some(cfg)) => {
+        Ok((Some(cfg), _)) => {
             if let Some(path_str) = cfg.scan.path {
                 root.join(&path_str)
             } else {
@@ -261,7 +381,7 @@ path = "src"
         _ => panic!("Should load config with path"),
     };
 
-    let (findings, _, _) = scan_directory(&config_root, &[], &[]).unwrap();
+    let (findings, _, _, _) = scan_directory(&config_root, &[], &[]).unwrap();
     assert!(
         findings
             .iter()

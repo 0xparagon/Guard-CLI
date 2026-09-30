@@ -22,14 +22,23 @@ soroban-guard scan ./my-contract --json --output findings.json
 
 ## Top-level envelope
 
-Every `--json` response is a single JSON object with two keys.
+Every `--json` response is a single JSON object with these top-level keys.
 
 ```jsonc
 {
+  "tool": {
+    "name": "soroban-guard",
+    "version": "0.1.0"
+  },
+  "schema_version": 1,
   "summary":  { /* ScanSummary — see below */ },
   "findings": [ /* Finding[] — see below */ ]
 }
 ```
+
+The `tool` object identifies the binary that produced the report, and
+`schema_version` is the envelope schema version. `schema_version` is bumped only
+on breaking changes to the envelope.
 
 On a scan error (I/O failure or parse error) the tool exits with code `2` and
 emits a reduced envelope instead:
@@ -37,6 +46,31 @@ emits a reduced envelope instead:
 ```json
 { "error": "failed to read src/lib.rs: permission denied" }
 ```
+
+When more than one file fails to parse or read, `error` carries a summary and
+`errors` carries every individual failure, sorted by path, so a crate with
+several broken files can be fixed in one pass instead of one fix-and-rerun
+cycle per file:
+
+```json
+{
+  "error": "2 files failed to scan",
+  "errors": [
+    "Failed to parse src/a.rs: unexpected token",
+    "Failed to parse src/b.rs: unexpected token"
+  ]
+}
+```
+
+`errors` is always present in the error envelope; for a single failure it
+contains that one message.
+
+### `ToolInfo` object
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Binary name; always `"soroban-guard"`. |
+| `version` | string | Package version emitted from `CARGO_PKG_VERSION`, such as `"0.1.0"`. |
 
 ### `ScanSummary` object
 

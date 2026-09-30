@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "properties": {
+            "files_skipped": 0
+          }
+        }
+      ],
+      "results": [
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lib.rs"
+                },
+                "region": {
+                  "startLine": 14
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Method `bump` writes to `env.storage()` but does not call `env.require_auth()`. Callers may mutate contract state without proving they are authorized."
+          },
+          "ruleId": "missing-require-auth"
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lib.rs"
+                },
+                "region": {
+                  "startLine": 14
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Method `bump` writes to storage but does not emit an event. Consider using `env.events().publish(…)` to allow off-chain indexers to track contract activity."
+          },
+          "ruleId": "missing-event-emission"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lib.rs"
+                },
+                "region": {
+                  "startLine": 26
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Method `bump` writes to `env.storage()` but does not call `env.require_auth()`. Callers may mutate contract state without proving they are authorized."
+          },
+          "ruleId": "missing-require-auth"
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lib.rs"
+                },
+                "region": {
+                  "startLine": 26
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Method `bump` writes to storage but does not emit an event. Consider using `env.events().publish(…)` to allow off-chain indexers to track contract activity."
+          },
+          "ruleId": "missing-event-emission"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lib.rs"
+                },
+                "region": {
+                  "startLine": 38
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Method `bump` writes to `env.storage()` but does not call `env.require_auth()`. Callers may mutate contract state without proving they are authorized."
+          },
+          "ruleId": "missing-require-auth"
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lib.rs"
+                },
+                "region": {
+                  "startLine": 38
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Method `bump` writes to storage but does not emit an event. Consider using `env.events().publish(…)` to allow off-chain indexers to track contract activity."
+          },
+          "ruleId": "missing-event-emission"
+        }
+      ],
+      "tool": {
+        "driver": {
+          "informationUri": "https://github.com/SorobanGuard/Guard-CLI",
+          "name": "soroban-guard",
+          "rules": [
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "Method writes to storage without env.require_auth()"
+              },
+              "helpUri": "https://github.com/SorobanGuard/Guard-CLI",
+              "id": "missing-require-auth",
+              "shortDescription": {
+                "text": "Method writes to storage without env.require_auth()"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "State-mutating function emits no events"
+              },
+              "helpUri": "https://github.com/SorobanGuard/Guard-CLI",
+              "id": "missing-event-emission",
+              "shortDescription": {
+                "text": "State-mutating function emits no events"
+              }
+            }
+          ],
+          "version": "0.1.0",
+          "semanticVersion": "0.1.0"
+        }
+      }
+    }
+  ],
+  "version": "2.1.0"
+}

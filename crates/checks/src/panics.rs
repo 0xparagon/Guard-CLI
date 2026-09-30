@@ -1,10 +1,10 @@
 //! Panic-in-contract: `panic!`, `unwrap()`, `expect(…)`, `unreachable!()` in contract methods.
 
-use crate::util::contractimpl_functions_excluding_test;
+use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_storage};
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Expr, ExprCall, ExprMethodCall, File};
+use syn::{Expr, ExprMethodCall, File};
 
 /// Returns true when `expr` is **exactly** `.get(…)`/`.get_unchecked(…)` chained directly onto a
 /// `.storage()` receiver chain — the same pattern that
@@ -21,19 +21,6 @@ fn is_storage_get(expr: &Expr) -> bool {
             (m.method == "get" || m.method == "get_unchecked")
                 && receiver_chain_contains_storage(&m.receiver)
         }
-        _ => false,
-    }
-}
-
-fn receiver_chain_contains_storage(expr: &Expr) -> bool {
-    match expr {
-        Expr::MethodCall(m) => {
-            if m.method == "storage" {
-                return true;
-            }
-            receiver_chain_contains_storage(&m.receiver)
-        }
-        Expr::Field(f) => receiver_chain_contains_storage(&f.base),
         _ => false,
     }
 }
@@ -93,7 +80,11 @@ impl PanicVisitor<'_> {
                 "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#panic-in-contract-medium"
                     .to_string(),
             ),
-                suggestion: None,
+            suggestion: Some(
+                "Replace with `env.panic_with_error(&MyError::Variant)` or change the \
+                 return type to `Result<T, MyError>` and return `Err(…)` instead."
+                    .to_string(),
+            ),
         });
     }
 }
@@ -101,7 +92,7 @@ impl PanicVisitor<'_> {
 impl<'ast> Visit<'ast> for PanicVisitor<'_> {
     fn visit_macro(&mut self, i: &'ast syn::Macro) {
         let name = macro_name(i);
-        if matches!(name.as_str(), "panic" | "unreachable") {
+        if matches!(name.as_str(), "panic" | "unreachable" | "todo" | "unimplemented") {
             self.push(i.span().start().line, &format!("{name}!"));
         }
         visit::visit_macro(self, i);
@@ -113,16 +104,6 @@ impl<'ast> Visit<'ast> for PanicVisitor<'_> {
             self.push(i.span().start().line, &format!(".{name}()"));
         }
         visit::visit_expr_method_call(self, i);
-    }
-
-    // also catch `panic!(...)` used as a statement via ExprCall in case syn parses it differently
-    fn visit_expr_call(&mut self, i: &'ast ExprCall) {
-        if let Expr::Path(p) = &*i.func {
-            if p.path.is_ident("panic") {
-                self.push(i.span().start().line, "panic!");
-            }
-        }
-        visit::visit_expr_call(self, i);
     }
 }
 
@@ -189,6 +170,33 @@ pub struct C;
 #[contractimpl]
 impl C {
     pub fn f(_env: Env) { unreachable!(); }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn flags_todo_macro() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(_env: Env) { todo!("not implemented yet"); }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].check_name, "panic-in-contract");
+    }
+
+    #[test]
+    fn flags_unimplemented_macro() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(_env: Env) { unimplemented!(); }
 }
 "#);
         assert_eq!(hits.len(), 1);

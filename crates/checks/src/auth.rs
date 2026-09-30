@@ -1,10 +1,14 @@
 //! Missing `env.require_auth()` before storage writes in `#[contractimpl]` methods.
 
-use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_storage};
+use crate::util::{
+    address_param_names, contractimpl_functions_excluding_test, env_param_name,
+    is_storage_mutation_call, receiver_is_auth_gate, type_is_address, type_is_env,
+};
 use crate::{Check, Finding, Severity};
+use std::collections::HashSet;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Block, Expr, ExprMethodCall, File, FnArg, Pat, Type};
+use syn::{Block, Expr, ExprMethodCall, File, FnArg, Pat, Stmt, Type};
 
 const CHECK_NAME: &str = "missing-require-auth";
 
@@ -55,94 +59,53 @@ impl Check for MissingRequireAuthCheck {
     }
 }
 
-/// Returns the name of the first parameter whose type is `Env` (or `soroban_sdk::Env`).
-fn env_param_name(sig: &syn::Signature) -> Option<String> {
-    for arg in &sig.inputs {
-        let FnArg::Typed(pat_type) = arg else {
-            continue;
-        };
-        if !type_is_env(&pat_type.ty) {
-            continue;
-        }
-        if let Pat::Ident(ident) = &*pat_type.pat {
-            return Some(ident.ident.to_string());
-        }
-    }
-    None
-}
-
-fn type_is_env(ty: &Type) -> bool {
-    let Type::Path(tp) = ty else {
-        return false;
-    };
-    tp.path.segments.last().is_some_and(|s| s.ident == "Env")
-}
-
-fn type_is_address(ty: &Type) -> bool {
-    let Type::Path(tp) = ty else {
-        return false;
-    };
-    tp.path.segments.last().is_some_and(|s| s.ident == "Address")
-}
-
-fn address_param_names(sig: &syn::Signature) -> Vec<String> {
-    let mut names = Vec::new();
-    for arg in &sig.inputs {
-        let FnArg::Typed(pat_type) = arg else {
-            continue;
-        };
-        if type_is_address(&pat_type.ty) {
-            if let Pat::Ident(ident) = &*pat_type.pat {
-                names.push(ident.ident.to_string());
-            }
-        }
-    }
-    names
-}
-
-fn is_storage_mutation_call(m: &ExprMethodCall) -> bool {
-    let name = m.method.to_string();
-    if !matches!(
-        name.as_str(),
-        "set" | "remove" | "extend_ttl" | "bump" | "append"
-    ) {
-        return false;
-    }
-    receiver_chain_contains_storage(&m.receiver)
-}
-
-fn is_env_require_auth(m: &ExprMethodCall, env_name: &str, address_names: &[String]) -> bool {
+fn is_env_require_auth(
+    m: &ExprMethodCall,
+    env_name: &str,
+    address_names: &[String],
+    address_locals: &HashSet<String>,
+) -> bool {
     if m.method != "require_auth" && m.method != "require_auth_for_args" {
         return false;
     }
-    match &*m.receiver {
-        Expr::Path(p) => {
-            if p.path.is_ident(env_name) {
-                return true;
-            }
-            for addr in address_names {
-                if p.path.is_ident(addr) {
-                    return true;
-                }
-            }
-            false
-        }
-        _ => false,
-    }
+    receiver_is_auth_gate(&m.receiver, env_name, address_names, address_locals)
 }
 
-fn is_auth_helper_method_call(m: &ExprMethodCall, env_name: &str, address_names: &[String]) -> bool {
+fn is_auth_helper_method_call(
+    m: &ExprMethodCall,
+    env_name: &str,
+    address_names: &[String],
+    address_locals: &HashSet<String>,
+) -> bool {
     let name = m.method.to_string();
-    name.starts_with("assert_auth")
-        || name.starts_with("check_auth")
+    // Require an exact helper name (not merely a name fragment) so methods like
+    // `check_authorization_table()` are not mistaken for an auth call.
+    name == "assert_auth"
+        || name == "check_auth"
         || (name.starts_with("require_auth")
-            && !is_env_require_auth(m, env_name, address_names)
+            && !is_env_require_auth(m, env_name, address_names, address_locals)
             && !matches!(&*m.receiver, Expr::Path(_)))
+}
+
+/// Name bound by a `let` pattern whose (possibly annotated) type is `Address`.
+fn address_local_binding(pat: &Pat) -> Option<String> {
+    match pat {
+        Pat::Type(pt) => {
+            if type_is_address(&pt.ty) {
+                address_local_binding(&pt.pat)
+            } else {
+                None
+            }
+        }
+        Pat::Ident(pi) => Some(pi.ident.to_string()),
+        _ => None,
+    }
 }
 
 struct FuncBodyScan {
     env_name: String,
     address_names: Vec<String>,
+    address_locals: HashSet<String>,
     storage_write: bool,
     env_require_auth: bool,
     auth_helper_called: bool,
@@ -153,6 +116,7 @@ impl FuncBodyScan {
         Self {
             env_name: env_name.unwrap_or("env").to_string(),
             address_names,
+            address_locals: HashSet::new(),
             storage_write: false,
             env_require_auth: false,
             auth_helper_called: false,
@@ -161,14 +125,24 @@ impl FuncBodyScan {
 }
 
 impl<'ast> Visit<'ast> for FuncBodyScan {
+    fn visit_stmt(&mut self, stmt: &'ast Stmt) {
+        if let Stmt::Local(local) = stmt {
+            if let (Some(name), Some(_init)) = (address_local_binding(&local.pat), &local.init) {
+                self.address_locals.insert(name);
+            }
+        }
+        visit::visit_stmt(self, stmt);
+    }
+
     fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
         if is_storage_mutation_call(i) {
             self.storage_write = true;
         }
-        if is_env_require_auth(i, &self.env_name, &self.address_names) {
+        if is_env_require_auth(i, &self.env_name, &self.address_names, &self.address_locals) {
             self.env_require_auth = true;
         }
-        if is_auth_helper_method_call(i, &self.env_name, &self.address_names) {
+        if is_auth_helper_method_call(i, &self.env_name, &self.address_names, &self.address_locals)
+        {
             self.auth_helper_called = true;
         }
         visit::visit_expr_method_call(self, i);
@@ -399,6 +373,134 @@ impl Contract {
 "#,
         )?;
         assert!(hits.is_empty(), "e.require_auth() should satisfy the check");
+        Ok(())
+    }
+
+    #[test]
+    fn helper_name_fragment_does_not_suppress_finding() -> Result<(), syn::Error> {
+        // #512: `self.check_authorization_table()` merely starts with `check_auth`
+        // but is not an auth call, so the missing-require-auth finding must still fire.
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, Env, Symbol};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn set_config(env: Env, v: u32) {
+        self.check_authorization_table();
+        env.storage().instance().set(&Symbol::new(&env, "cfg"), &v);
+    }
+}
+"#,
+        )?;
+        assert_eq!(
+            hits.len(),
+            1,
+            "`self.check_authorization_table()` must not suppress the finding"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn passes_when_self_field_require_auth() -> Result<(), syn::Error> {
+        // #514: `self.admin.require_auth()` has an `Expr::Field` receiver.
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, Env, Symbol};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn set_config(env: Env, v: u32) {
+        self.admin.require_auth();
+        env.storage().instance().set(&Symbol::new(&env, "cfg"), &v);
+    }
+}
+"#,
+        )?;
+        assert!(
+            hits.is_empty(),
+            "`self.admin.require_auth()` should satisfy the check"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn passes_when_cloned_address_require_auth() -> Result<(), syn::Error> {
+        // #514: `admin.clone().require_auth()` has an `Expr::MethodCall` receiver.
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env, Symbol};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn set_config(env: Env, admin: Address, v: u32) {
+        admin.clone().require_auth();
+        env.storage().instance().set(&Symbol::new(&env, "cfg"), &v);
+    }
+}
+"#,
+        )?;
+        assert!(
+            hits.is_empty(),
+            "`admin.clone().require_auth()` should satisfy the check"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn passes_when_local_address_require_auth() -> Result<(), syn::Error> {
+        // #514: a function-local binding of type `Address` is a valid auth gate.
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env, Symbol};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn set_config(env: Env, v: u32) {
+        let admin: Address = env.storage().instance().get(&Symbol::new(&env, "admin")).unwrap();
+        admin.require_auth();
+        env.storage().instance().set(&Symbol::new(&env, "cfg"), &v);
+    }
+}
+"#,
+        )?;
+        assert!(
+            hits.is_empty(),
+            "`let admin: Address = ...; admin.require_auth()` should satisfy the check"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn passes_when_only_storage_call_is_extend_ttl() -> Result<(), syn::Error> {
+        // #401: extending a ledger entry's TTL is not a state mutation and must not be
+        // flagged as requiring prior authorization.
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::Env;
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn bump_balance(env: Env, key: u32) {
+        env.storage().persistent().extend_ttl(&key, 100, 1000);
+    }
+}
+"#,
+        )?;
+        assert!(
+            hits.is_empty(),
+            "`extend_ttl` alone must not be treated as a storage mutation requiring auth"
+        );
         Ok(())
     }
 }

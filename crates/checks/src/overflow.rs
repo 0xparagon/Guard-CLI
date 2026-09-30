@@ -35,16 +35,27 @@ fn severity_for_operand_name(name: &str) -> Option<Severity> {
     None
 }
 
-fn expr_ident(e: &Expr) -> Option<String> {
+/// Extract a name fragment from an operand for the severity heuristic. Handles bare
+/// idents plus the common shapes of contract arithmetic: `self.balance` (field access),
+/// `balances[i]` (index base), and `pool.reserve()` (method call).
+fn operand_name(e: &Expr) -> Option<String> {
     match e {
         Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+        Expr::Field(f) => match &f.member {
+            syn::Member::Named(id) => Some(id.to_string()),
+            syn::Member::Unnamed(_) => None,
+        },
+        Expr::Index(i) => operand_name(&i.expr),
+        Expr::MethodCall(m) => Some(m.method.to_string()),
+        Expr::Reference(r) => operand_name(&r.expr),
+        Expr::Paren(p) => operand_name(&p.expr),
         _ => None,
     }
 }
 
 fn infer_severity(e: &ExprBinary) -> Severity {
     for operand in [&*e.left, &*e.right] {
-        if let Some(name) = expr_ident(operand) {
+        if let Some(name) = operand_name(operand) {
             if let Some(sev) = severity_for_operand_name(&name) {
                 return sev;
             }
@@ -78,7 +89,14 @@ impl<'ast> Visit<'ast> for SafeArithScan<'_> {
                     let left = &*self.binary_expr.left;
                     let right = &*self.binary_expr.right;
                     let recv = &*i.receiver;
-                    if (left == recv && right == arg) || (right == recv && left == arg) {
+                    let operands_match =
+                        (left == recv && right == arg) || (right == recv && left == arg);
+                    // Only suppress when the `checked_*` call guards *this* expression, i.e.
+                    // it sits at the same source location. An operand-equal `checked_*` on
+                    // another line (e.g. an earlier discarded computation) is unrelated and
+                    // must not silence a genuinely unchecked `a + b`.
+                    let same_site = i.span().start().line == self.binary_expr.span().start().line;
+                    if operands_match && same_site {
                         self.found = true;
                     }
                 }
@@ -129,7 +147,9 @@ fn is_unchecked_binary(e: &ExprBinary) -> bool {
         BinOp::Add(_) | BinOp::Sub(_) | BinOp::Mul(_) => {
             !(is_literal_expr(&e.left) && is_literal_expr(&e.right))
         }
-        BinOp::AddAssign(_) | BinOp::SubAssign(_) | BinOp::MulAssign(_) => true,
+        BinOp::AddAssign(_) | BinOp::SubAssign(_) | BinOp::MulAssign(_) => {
+            !is_literal_expr(&e.right)
+        }
         _ => false,
     }
 }
@@ -166,10 +186,14 @@ impl Visit<'_> for ArithVisitor<'_> {
                     self.fn_name
                 ),
                 rule_url: Some(
-                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-arithmetic"
+                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-arithmetic-high--medium--low"
                         .to_string(),
                 ),
-                suggestion: None,
+                suggestion: Some(format!(
+                    "Replace `{op}` with `checked_add`/`checked_sub`/`checked_mul` and \
+                     handle overflow explicitly, or use `saturating_add`/`saturating_sub` \
+                     if saturating semantics are acceptable."
+                )),
             });
         }
         visit::visit_expr_binary(self, i);
@@ -272,6 +296,50 @@ impl C {
     }
 
     #[test]
+    fn ignores_add_assign_of_literal() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+
+pub struct C;
+
+#[contractimpl]
+impl C {
+    pub fn acc(env: Env, mut x: i128) {
+        let _ = env;
+        x += 1;
+    }
+}
+"#,
+        )?;
+        let hits = UncheckedArithmeticCheck.run(&file, "");
+        assert!(hits.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn flags_add_assign_of_non_literal() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+
+pub struct C;
+
+#[contractimpl]
+impl C {
+    pub fn acc(env: Env, mut x: i128, y: i128) {
+        let _ = env;
+        x += y;
+    }
+}
+"#,
+        )?;
+        let hits = UncheckedArithmeticCheck.run(&file, "");
+        assert_eq!(hits.len(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn ignores_non_contractimpl() -> Result<(), syn::Error> {
         let file = parse_file(
             r#"
@@ -314,6 +382,27 @@ impl C {
     }
 
     #[test]
+    fn field_operand_gets_high_severity() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn credit(env: Env, amount: i128) -> i128 {
+        let _ = env;
+        self.balance + amount
+    }
+}
+"#,
+        )?;
+        let hits = UncheckedArithmeticCheck.run(&file, "");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].severity, Severity::High);
+        Ok(())
+    }
+
+    #[test]
     fn index_name_gets_low_severity() -> Result<(), syn::Error> {
         let file = parse_file(
             r#"
@@ -331,6 +420,27 @@ impl C {
         let hits = UncheckedArithmeticCheck.run(&file, "");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].severity, Severity::Low);
+        Ok(())
+    }
+
+    #[test]
+    fn discarded_checked_add_does_not_suppress_later_unchecked_add() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(env: Env, a: i128, b: i128) -> i128 {
+        let _ = env;
+        let _preview = a.checked_add(b);
+        a + b
+    }
+}
+"#,
+        )?;
+        let hits = UncheckedArithmeticCheck.run(&file, "");
+        assert_eq!(hits.len(), 1);
         Ok(())
     }
 

@@ -694,19 +694,33 @@ fn truncate(findings: &[Finding], max: usize) -> (&[Finding], usize) {
 }
 
 fn build_sarif(findings: &[Finding], files_skipped: usize) -> serde_json::Value {
-    let mut rules = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
+    // Collect the highest severity observed for each check name so that
+    // defaultConfiguration.level reflects the worst-case rule level rather than
+    // whichever finding happens to appear first in the slice.
+    let mut rule_severity: std::collections::BTreeMap<&str, Severity> =
+        std::collections::BTreeMap::new();
     for finding in findings {
-        if seen.insert(finding.check_name.clone()) {
-            rules.push(serde_json::json!({
-                "id": finding.check_name,
-                "shortDescription": { "text": describe_rule(&finding.check_name) },
-                "fullDescription": { "text": describe_rule(&finding.check_name) },
-                "defaultConfiguration": { "level": severity_to_sarif_level(finding.severity) },
-                "helpUri": "https://github.com/SorobanGuard/Guard-CLI"
-            }));
+        let entry = rule_severity
+            .entry(finding.check_name.as_str())
+            .or_insert(finding.severity);
+        if finding.severity < *entry {
+            // Severity::High < Medium < Low (rank 0 < 1 < 2), so a smaller
+            // rank means higher severity — keep the most severe.
+            *entry = finding.severity;
         }
     }
+    let rules: Vec<serde_json::Value> = rule_severity
+        .iter()
+        .map(|(name, &sev)| {
+            serde_json::json!({
+                "id": name,
+                "shortDescription": { "text": describe_rule(name) },
+                "fullDescription": { "text": describe_rule(name) },
+                "defaultConfiguration": { "level": severity_to_sarif_level(sev) },
+                "helpUri": "https://github.com/SorobanGuard/Guard-CLI"
+            })
+        })
+        .collect();
     let results = findings
         .iter()
         .map(|finding| {
